@@ -1,0 +1,24 @@
+{
+  "name": "agentrail",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@somnia-chain/markets-sdk": "^0.28.1",
+    "abitype": "^1.2.3",
+    "eventemitter3": "^5.0.1",
+    "graphql": "^17.0.2",
+    "isows": "^1.0.7",
+    "ox": "^0.14.34",
+    "viem": "^2.55.19",
+    "ws": "^8.21.0"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs"
+}

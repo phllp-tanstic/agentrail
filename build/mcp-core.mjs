@@ -1,0 +1,714 @@
+// ============================================================================
+// AgentRail MCP CORE — the four tools, as plain async functions.
+//
+// THIN WRAPPERS ONLY. Every code path here is lifted from a script in build/
+// that has a live testnet proof behind it in research/PROOF-LOG.md. Where a
+// behaviour is NOT proven, the tool REFUSES rather than attempts it.
+//
+// Provenance, function by function:
+//   listMarkets  <- part3-win-proof.mjs:98-120 (pickYesMarket) + :139-143 (gate)
+//   placeOrder   <- part3-win-proof.mjs:146-182 (snap -> approve -> sim -> place)
+//   getPosition  <- part3-win-proof.mjs:71 (bal6909) + phase-a-lifecycle.mjs:268
+//   redeem       <- phase-a-lifecycle.mjs:253-330 (Finalized scan + 5b grant)
+//                   + part3-win-proof.mjs:199-244 (guard -> broadcast -> delta)
+//
+// SCOPE FENCES (deliberate refusals — see build/PHASE-B-LOG.md):
+//   - direction: YES only.   NO-side fills are an open, undetermined phenomenon.
+//   - window:    300s only.  60s books were empty in every sample.
+//   - path:      self `placeBinaryOrder` (0x718c2d4d) only. The delegated
+//                `placeBinaryOrderFor` path is gated by OnlyApprovedContracts()
+//                and is closed.
+// ============================================================================
+import * as SDK from '@somnia-chain/markets-sdk';
+import { somniaShannon } from '@somnia-chain/markets-sdk/chains';
+import {
+  createPublicClient, createWalletClient, http, erc20Abi, encodeFunctionData,
+  formatUnits,
+} from 'viem';
+import { privateKeyToAccount } from 'viem/accounts';
+import { redeemGuard } from './redeem-guard.mjs';
+import { snapPriceToTick, isOnTick, exactToRaw } from './tick-snap.mjs';
+import { checkPreOrder, recordSpend, recordPayout, riskSnapshot, RISK_CONFIG } from './risk.mjs';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// ---------------------------------------------------------------- constants
+const RPC = 'https://api.infra.testnet.somnia.network';
+const INDEXER = 'https://dev.smk.somnia.host/v1/graphql';
+const A = SDK.SOMNIA_TESTNET_ADDRESSES;
+const COLL = A.collateral;
+const OUTCOME_TOKEN = '0xB52c5934113Af5c0Bb20eb3C72290C8215f755b9'; // ERC6909, confirmed run 1
+const MODULE = '0x3ecC694Cef705358864a646142ac17A90E29e388';        // binaryMarketsModule
+const COLL_DEC = 6;                                                 // tUSDC on testnet
+
+// Scope fences, enforced not documented.
+export const ALLOWED_DIRECTIONS = ['YES'];
+export const ALLOWED_WINDOWS = [300];
+
+// ------------------------------------------------------------------ helpers
+const __dir = path.dirname(fileURLToPath(import.meta.url));
+// cwd-independent: an MCP server is launched by its client from an arbitrary cwd,
+// so this file is resolved against the module, not the process working dir.
+const ERRMAP = JSON.parse(fs.readFileSync(
+  path.resolve(__dir, '../research/onchain-proof/error-selectors.json'), 'utf8'));
+
+export const jsonSafe = (o) =>
+  JSON.parse(JSON.stringify(o, (k, v) => (typeof v === 'bigint' ? v.toString() : v)));
+
+// decodeRevert / rawCall lifted verbatim from part3-win-proof.mjs:43-62
+function decodeRevert(d) {
+  if (!d) return 'NO REVERT DATA';
+  if (d === '0x') return 'EMPTY 0x (not dispatched)';
+  const s = d.slice(0, 10).toLowerCase();
+  const named = ERRMAP[s];
+  let out = `${s} = ${named ?? 'UNKNOWN'}`;
+  if (named && d.length > 10) {
+    const types = named.slice(named.indexOf('(') + 1, -1).split(',').filter(Boolean);
+    const words = d.slice(10).match(/.{64}/g) || [];
+    out += ` ( ${words.map((w, i) => types[i] === 'address' ? `address=0x${w.slice(24)}` : `${types[i] ?? '?'}=${BigInt('0x' + w)}`).join(', ')} )`;
+  }
+  return out;
+}
+async function rawCall({ from, to, data }) {
+  const body = { jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ from, to, data }, 'latest'] };
+  const r = await (await fetch(RPC, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })).json();
+  if (!r.error) return { ok: true, result: r.result };
+  const m = JSON.stringify(r.error).match(/0x[0-9a-fA-F]{8,}/);
+  return { ok: false, data: m ? m[0] : '0x', msg: r.error.message };
+}
+
+// ------------------------------------------------------------ lazy chain ctx
+// Read-only tools must work with no key present; only write tools require one.
+let _ctx = null;
+function ctx({ requireKey = false } = {}) {
+  if (!_ctx) {
+    const pc = createPublicClient({ chain: somniaShannon, transport: http(RPC) });
+    const ex = new SDK.SomniaMarkets({ chain: somniaShannon, rpcUrl: RPC, indexerUrl: INDEXER, addresses: A });
+    const KEY = process.env.AGENTRAIL_OWNER_KEY;
+    const owner = KEY ? privateKeyToAccount(KEY) : null;
+    const wc = owner ? createWalletClient({ account: owner, chain: somniaShannon, transport: http(RPC) }) : null;
+    _ctx = { pc, ex, owner, wc };
+  }
+  if (requireKey && !_ctx.owner) {
+    throw new Error('AGENTRAIL_OWNER_KEY is not set — this tool signs transactions and cannot run without it.');
+  }
+  return _ctx;
+}
+
+const bal6909 = (id) => ctx().pc.readContract({
+  address: OUTCOME_TOKEN, abi: SDK.erc6909Abi, functionName: 'balanceOf',
+  args: [ctx({ requireKey: true }).owner.address, BigInt(id)] });
+const balColl = () => ctx().pc.readContract({
+  address: COLL, abi: erc20Abi, functionName: 'balanceOf',
+  args: [ctx({ requireKey: true }).owner.address] });
+
+// send() lifted from part3-win-proof.mjs:63-70. Throws on a non-success receipt
+// by default (redeem relies on that). Pass throwOnRevert:false to get the receipt
+// back instead, so a caller can classify the failure and decide about retrying.
+async function send(txlog, label, req, { throwOnRevert = true } = {}) {
+  const { wc, pc } = ctx({ requireKey: true });
+  const hash = await wc.sendTransaction(req);
+  const rcpt = await pc.waitForTransactionReceipt({ hash });
+  txlog[label] = { hash, status: rcpt.status, block: Number(rcpt.blockNumber),
+    gasUsed: String(rcpt.gasUsed), logs: rcpt.logs.length };
+  if (rcpt.status !== 'success' && throwOnRevert) throw new Error(`${label} REVERTED: ${hash}`);
+  return rcpt;
+}
+
+// Find a market object (which carries tokenIds / operatorId / venueId) by id.
+// Checks the live listing first, then the Finalized scan — NOT default discovery,
+// because the two sets are disjoint (spec §3 Trap 1).
+async function findMarket(marketId) {
+  const { ex } = ctx();
+  const live = await ex.client.listLiveBinaryMarkets().catch(() => []);
+  const hit = live.find((m) => m.marketId === marketId);
+  if (hit) return { m: hit, source: 'listLiveBinaryMarkets' };
+  const fin = await ex.client.listBinaryMarkets({ status: 'Finalized', limit: 100 }).catch(() => []);
+  const f = fin.find((m) => m.marketId === marketId);
+  if (f) return { m: f, source: 'listBinaryMarkets({status:Finalized})' };
+  return { m: null, source: null };
+}
+
+// ============================================================================
+// TOOL 1 — list_markets
+// Status-gated (getMarketOnchain().status === Trading) live 300s windows, with
+// real resting YES-side ask depth reported per market. Depth IS cheaply
+// checkable (one getBinaryOrderBook per candidate), so it is checked.
+// Wraps part3-win-proof.mjs pickYesMarket() + the status gate.
+// ============================================================================
+export async function list_markets({ window_seconds = 300, require_yes_liquidity = true,
+  min_seconds_to_expiry = 25, max_seconds_to_expiry = 290 } = {}) {
+  if (!ALLOWED_WINDOWS.includes(Number(window_seconds))) {
+    return { ok: false, refused: true,
+      reason: `window_seconds=${window_seconds} is out of proven scope. Only ${ALLOWED_WINDOWS.join('/')}s windows are supported: 60s books were empty in every sample taken (PROOF-LOG RUN 3 PART 2). Other window lengths are future work, not a supported path.` };
+  }
+  const { ex } = ctx();
+  const live = await ex.client.listLiveBinaryMarkets();
+  const now = Math.floor(Date.now() / 1000);
+  const out = [], skipped = { wrongInterval: 0, outsideTimeWindow: 0, noYesDepth: 0, gateClosed: 0 };
+
+  for (const m of live) {
+    if (Number(m.intervalSec) !== Number(window_seconds)) { skipped.wrongInterval++; continue; }
+    const T = Number(m.expiry) - now;
+    if (T < min_seconds_to_expiry || T > max_seconds_to_expiry) { skipped.outsideTimeWindow++; continue; }
+
+    // real resting YES-side ask depth (the side proven to fill)
+    let ob = null;
+    try { ob = await ex.client.getBinaryOrderBook(m.poolAddress); } catch { /* treat as no depth */ }
+    const yesAsks = ob?.yesAsks ?? [];
+    const depth = yesAsks.reduce((a, l) => a + BigInt(l.quantity), 0n);
+    if (require_yes_liquidity && depth === 0n) { skipped.noYesDepth++; continue; }
+
+    // on-chain status gate — the single most avoidable live failure (spec §3)
+    const oc = await ex.client.getMarketOnchain(m.marketId).catch(() => null);
+    const gateOpen = oc?.status === 1 || oc?.status === 'Trading';
+    if (!gateOpen) { skipped.gateClosed++; continue; }
+
+    const DEC = Number(m.quoteDecimals);
+    out.push({
+      marketId: m.marketId, asset: m.asset, pool: m.poolAddress,
+      intervalSec: Number(m.intervalSec), expiry: Number(m.expiry), secondsToExpiry: T,
+      onchainStatus: oc.status, statusGate: 'OPEN',
+      yesAskDepthUnits: formatUnits(depth, DEC), yesAskDepthRaw: String(depth),
+      bestYesAsk: yesAsks[0] ? String(yesAsks[0].price) : null,
+      bestYesAskProb: yesAsks[0] ? formatUnits(BigInt(yesAsks[0].price), DEC) : null,
+      quoteDecimals: DEC, yesTokenId: String(m.yesTokenId), noTokenId: String(m.noTokenId),
+    });
+  }
+  out.sort((a, b) => a.secondsToExpiry - b.secondsToExpiry); // soonest settlement first
+  return { ok: true, scope: { direction: 'YES only', windowSeconds: Number(window_seconds) },
+    liveMarketsSeen: live.length, tradeable: out.length, markets: out, skipped,
+    note: 'Depth shown is real resting yesAsks only. The NO arrays returned by getBinaryOrderBook are an arithmetic mirror of the YES book and would double-count liquidity (PROOF-LOG RUN 3 PART 2).' };
+}
+
+// ============================================================================
+// TOOL 2 — place_order
+// Wraps part3-win-proof.mjs:146-182: snap the crossing price to a valid tick via
+// the SHARED snapper, auto-approve the per-pool ERC20 allowance on 0xfb8f41b2,
+// simulate, broadcast, then confirm the fill by ERC6909 + collateral BALANCE
+// DELTA — never by tx status, which is success even on a non-fill.
+//
+// Phase C adds, in order of evaluation:
+//   - two sizing modes: raw `stake_units` (unchanged) OR `targetDollarAmount`
+//   - `maxSlippagePct` refusal if the reference price drifts before placement
+//   - server-side risk guardrails (./risk.mjs) evaluated BEFORE any broadcast
+//   - a reverted broadcast returns {ok:false, reason:'reverted'} instead of
+//     throwing, and gets EXACTLY ONE automatic retry
+// ============================================================================
+export async function place_order(input = {}) {
+  const {
+    market_id, direction = 'YES', cross_ticks = 20, window_seconds = 300,
+  } = input;
+  // Accept both the camelCase names Phase C specified and snake_case matching the
+  // existing tool surface, so either spelling works from any caller.
+  const targetDollarAmount = input.targetDollarAmount ?? input.target_dollar_amount ?? null;
+  const maxSlippagePct = Number(input.maxSlippagePct ?? input.max_slippage_pct ?? 5);
+  const stakeUnitsIn = input.stake_units ?? input.stakeUnits ?? null;
+
+  const dir = String(direction).toUpperCase();
+  if (!ALLOWED_DIRECTIONS.includes(dir)) {
+    return { ok: false, refused: true, reason: 'direction_out_of_scope',
+      detail: `direction=${dir} is out of proven scope. Only YES is supported. A BUY_NO has never filled at any expressible price across two runs (0.58 and 0.999, byte-identical gas), and the cause is undetermined — logged, not root-caused (PROOF-LOG RUN 2 / RUN 3 PART 2).` };
+  }
+  if (!ALLOWED_WINDOWS.includes(Number(window_seconds))) {
+    return { ok: false, refused: true, reason: 'window_out_of_scope',
+      detail: `window_seconds=${window_seconds} is out of proven scope. Only ${ALLOWED_WINDOWS.join('/')}s windows are supported (PROOF-LOG RUN 3 PART 2).` };
+  }
+  if (!market_id) return { ok: false, refused: true, reason: 'market_id_required' };
+
+  // --- sizing mode: exactly one of the two paths
+  if (targetDollarAmount !== null && stakeUnitsIn !== null) {
+    return { ok: false, refused: true, reason: 'ambiguous_sizing',
+      detail: `both targetDollarAmount (${targetDollarAmount}) and stake_units (${stakeUnitsIn}) were given. Specify exactly one — they are alternative ways to size the same order.` };
+  }
+  const sizingMode = targetDollarAmount !== null ? 'DOLLAR' : 'UNITS';
+  const stakeUnits = sizingMode === 'UNITS' ? Number(stakeUnitsIn ?? 1.0) : null;
+  if (sizingMode === 'DOLLAR' && !(Number(targetDollarAmount) > 0)) {
+    return { ok: false, refused: true, reason: 'invalid_target_dollar_amount',
+      detail: `targetDollarAmount=${targetDollarAmount} must be a positive number.` };
+  }
+
+  const { ex, owner } = ctx({ requireKey: true });
+  const R = { tool: 'place_order', owner: owner.address, marketId: market_id,
+    direction: dir, sizingMode, tx: {}, attempts: [] };
+
+  const { m: M, source } = await findMarket(market_id);
+  if (!M) return { ok: false, reason: 'market_not_found',
+    detail: `market ${market_id} not found in the live listing or the Finalized scan.` };
+  R.marketSource = source;
+  if (Number(M.intervalSec) !== Number(window_seconds)) {
+    return { ok: false, refused: true, reason: 'window_mismatch',
+      detail: `market ${market_id} has intervalSec=${M.intervalSec}, not the required ${window_seconds}s.` };
+  }
+  const DEC = Number(M.quoteDecimals);
+  const ONE = 10n ** BigInt(DEC);
+  const toUsd = (raw) => Number(formatUnits(raw, DEC));
+  R.pool = M.poolAddress; R.asset = M.asset; R.intervalSec = Number(M.intervalSec);
+
+  const bp = await ex.client.getBinaryBookParams(M.poolAddress);
+  const tick = BigInt(bp.tickSize);
+  const minQ = BigInt(bp.minQuantity);
+
+  // ------------------------------------------------------------------ attempts
+  // Exactly one automatic retry, and only for a revert we classify as retryable.
+  const MAX_ATTEMPTS = 2;
+  let riskApproved = null;
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const AT = { attempt };
+
+    // --- on-chain status gate, immediately before the write (spec §3)
+    const onchain = await ex.client.getMarketOnchain(market_id);
+    const gateOpen = onchain.status === 1 || onchain.status === 'Trading';
+    AT.statusGate = { status: onchain.status, open: gateOpen };
+    if (!gateOpen) {
+      R.attempts.push(AT);
+      return { ok: false, refused: true, ...R, reason: 'status_gate_closed',
+        detail: `status gate CLOSED (status=${onchain.status}) — refusing to submit into a window already closed on-chain.` };
+    }
+
+    // --- REFERENCE read: the book as it stands when we size the order
+    const obRef = await ex.client.getBinaryOrderBook(M.poolAddress).catch(() => null);
+    const asksRef = obRef?.yesAsks ?? [];
+    if (!asksRef.length) {
+      R.attempts.push(AT);
+      return { ok: false, ...R, reason: 'no_resting_liquidity',
+        detail: 'no resting yesAsks on this market — nothing to cross. Pick a market from list_markets with non-zero yesAskDepthUnits.' };
+    }
+    const referencePrice = BigInt(asksRef[0].price);
+    const depth = asksRef.reduce((a, l) => a + BigInt(l.quantity), 0n);
+
+    // --- quantity
+    // NOTE ON TICK-SNAPPING QUANTITY, deliberately NOT done: snapPriceToTick()
+    // clamps its result into [tickSize, ONE − tickSize] because it snaps a
+    // PROBABILITY. Passing a quantity through it would corrupt any size above
+    // 1.0 unit — e.g. 2.012 units (2012000 raw at DEC=6) clamps to 999000, a
+    // silent 2x under-size. Quantity granularity is `minQuantity`, not
+    // `tickSize`, so quantity is rounded to a minQuantity multiple here. The
+    // PRICE still goes through the shared tick-snapper, unchanged.
+    let QTY, sizing;
+    if (sizingMode === 'DOLLAR') {
+      const targetRaw = exactToRaw(String(targetDollarAmount), DEC);
+      const rawQty = (targetRaw * ONE) / referencePrice;      // qty = $ / price
+      QTY = ((rawQty + minQ / 2n) / minQ) * minQ;             // -> minQuantity grid
+      if (QTY < minQ) QTY = minQ;
+      sizing = { mode: 'DOLLAR', targetDollarAmount: Number(targetDollarAmount),
+        referencePrice: String(referencePrice), referencePriceProb: formatUnits(referencePrice, DEC),
+        impliedQuantityRaw: String(rawQty), quantityRaw: String(QTY),
+        quantityUnits: formatUnits(QTY, DEC), minQuantity: String(minQ),
+        roundedToMinQuantityGrid: true,
+        note: 'Quantity is derived as targetDollarAmount / referencePrice, then rounded to a minQuantity multiple. Quantity is NOT run through the price tick-snapper — that function clamps into a probability band and would corrupt sizes above 1.0 unit.' };
+    } else {
+      const unit = minQ * 1000n;                              // proven Phase A unit
+      QTY = (BigInt(Math.round(Number(stakeUnits) * 1000)) * unit) / 1000n;
+      if (QTY <= 0n) {
+        R.attempts.push(AT);
+        return { ok: false, refused: true, ...R, reason: 'zero_quantity',
+          detail: `stake_units=${stakeUnits} resolves to zero quantity.` };
+      }
+      sizing = { mode: 'UNITS', stakeUnits: Number(stakeUnits), quantityRaw: String(QTY),
+        quantityUnits: formatUnits(QTY, DEC), minQuantity: String(minQ),
+        note: 'stake_units is OUTCOME-TOKEN QUANTITY, not a cash amount. Use targetDollarAmount to size by cash instead.' };
+    }
+    AT.sizing = sizing;
+
+    // --- price snap via the SHARED module (build/tick-snap.mjs) — not reimplemented
+    const bidYes = snapPriceToTick(formatUnits(referencePrice + BigInt(cross_ticks) * tick, DEC), tick, DEC);
+    AT.book = { bestYesAsk: String(referencePrice), bestYesAskProb: formatUnits(referencePrice, DEC),
+      yesAskDepthUnits: formatUnits(depth, DEC), tickSize: String(tick) };
+    AT.priceSnap = { crossTicks: Number(cross_ticks), snappedBid: String(bidYes),
+      snappedBidProb: formatUnits(bidYes, DEC), onTick: isOnTick(bidYes, tick),
+      ceilingHit: bidYes === ONE - tick };
+
+    // Worst case: we pay our own limit. Phase B observed exactly this (rested,
+    // then taken at our limit), so the risk check uses this, not the ask.
+    const worstCaseSpendRaw = (bidYes * QTY) / ONE;
+    const worstCaseSpendUsd = toUsd(worstCaseSpendRaw);
+    AT.spendEstimate = {
+      atReferencePriceUsd: toUsd((referencePrice * QTY) / ONE),
+      worstCaseAtOurLimitUsd: worstCaseSpendUsd,
+      note: 'worstCaseAtOurLimitUsd assumes we pay our own limit price, which is what Phase B observed when an order rested and was then taken. It is the figure the risk check uses.' };
+
+    // --- RISK GUARDRAILS — server-side, evaluated BEFORE any broadcast.
+    // Only on attempt 1: a retry re-places the same intent and must not be
+    // double-counted against the per-window cap.
+    if (attempt === 1) {
+      const rk = checkPreOrder({ marketId: market_id, estimatedSpendUsd: worstCaseSpendUsd });
+      AT.riskCheck = rk;
+      if (!rk.allow) {
+        R.attempts.push(AT);
+        return { ok: false, refused: true, ...R, reason: rk.code, detail: rk.reason,
+          riskStatus: riskSnapshot() };
+      }
+      riskApproved = rk;
+    } else {
+      AT.riskCheck = { skipped: 'already approved on attempt 1 — a retry is the same intent, not new exposure' };
+    }
+
+    // --- per-pool ERC20 allowance: recurs per window (proven runs 1 & 2)
+    const expireNs = BigInt(M.expiry) * 1_000_000_000n;
+    const mkData = (price) => encodeFunctionData({
+      abi: SDK.binaryPoolWriteAbi, functionName: 'placeBinaryOrder',
+      args: [SDK.ORDER_KIND.BUY_YES, price, QTY, expireNs, SDK.ORDER_TYPE.LIMIT,
+        SDK.SELF_MATCHING_OPTION.CANCEL_TAKER, SDK.ZERO_ADDRESS, 0n, 0n],
+    });
+    let dYes = mkData(bidYes);
+    let sim = await rawCall({ from: owner.address, to: M.poolAddress, data: dYes });
+    if (!sim.ok && sim.data?.slice(0, 10).toLowerCase() === '0xfb8f41b2') {
+      const spender = '0x' + sim.data.slice(34, 74);
+      AT.allowance = { needed: true, spender };
+      try {
+        await send(R.tx, `a${attempt}_approve`, { to: COLL, data: encodeFunctionData({
+          abi: erc20Abi, functionName: 'approve', args: [spender, 2n ** 256n - 1n] }) });
+      } catch (e) {
+        AT.allowanceError = e.shortMessage ?? e.message;
+        R.attempts.push(AT);
+        return { ok: false, ...R, reason: 'allowance_failed', detail: AT.allowanceError };
+      }
+      sim = await rawCall({ from: owner.address, to: M.poolAddress, data: dYes });
+    } else {
+      AT.allowance = { needed: false };
+    }
+
+    // --- SLIPPAGE CHECK: re-read the book immediately before broadcasting and
+    // compare against the reference we sized against. The gap is real — the
+    // allowance tx and the simulation both take seconds, and Phase B saw the
+    // best ask move 497000 -> 212000 inside ~30s.
+    const obNow = await ex.client.getBinaryOrderBook(M.poolAddress).catch(() => null);
+    const asksNow = obNow?.yesAsks ?? [];
+    const placementPrice = asksNow.length ? BigInt(asksNow[0].price) : referencePrice;
+    const slippagePct = referencePrice === 0n ? 0
+      : (Number(placementPrice - referencePrice) / Number(referencePrice)) * 100;
+    AT.slippage = {
+      referencePrice: String(referencePrice), placementPrice: String(placementPrice),
+      slippagePct: Number(slippagePct.toFixed(4)), maxSlippagePct,
+      estimatedSpendAtPlacementPriceUsd: toUsd((placementPrice * QTY) / ONE),
+      enforced: sizingMode === 'DOLLAR',
+      basis: 'adverse movement of the best ask between the reference read (used for sizing) and the read immediately before broadcast. The deliberate cross_ticks premium is NOT counted as slippage — it is intended, and is reported separately as worstCaseAtOurLimitUsd.' };
+
+    if (sizingMode === 'DOLLAR' && slippagePct > maxSlippagePct) {
+      R.attempts.push(AT);
+      return { ok: false, refused: true, ...R, reason: 'slippage_exceeded',
+        detail: `best ask moved ${slippagePct.toFixed(4)}% (${referencePrice} -> ${placementPrice}) between sizing and placement, exceeding maxSlippagePct=${maxSlippagePct}. The quantity sized for $${targetDollarAmount} would now spend about $${toUsd((placementPrice * QTY) / ONE).toFixed(6)}. NOT broadcast.`,
+        riskStatus: riskSnapshot() };
+    }
+
+    AT.simulation = sim.ok ? 'NO REVERT' : decodeRevert(sim.data);
+    if (!sim.ok) {
+      R.attempts.push(AT);
+      return { ok: false, ...R, reason: 'simulation_reverted',
+        detail: `order simulation reverted: ${AT.simulation} — NOT broadcast.` };
+    }
+    AT.calldata = { selector: dYes.slice(0, 10), bytes: (dYes.length - 2) / 2, path: 'self placeBinaryOrder' };
+
+    // ------------------------------------------------------------- broadcast
+    // TASK 1: a reverted broadcast is a NORMAL, state-dependent outcome — not an
+    // exception. Return the same structured shape as every other failure path.
+    const yesBefore = await bal6909(M.yesTokenId), collBefore = await balColl();
+    let rcpt = null, sendError = null;
+    try {
+      rcpt = await send(R.tx, `a${attempt}_placeBinaryOrder_BUY_YES`,
+        { to: M.poolAddress, data: dYes }, { throwOnRevert: false });
+    } catch (e) {
+      sendError = e.shortMessage ?? e.message;
+    }
+
+    const reverted = sendError === null && rcpt !== null && rcpt.status !== 'success';
+    if (reverted || sendError !== null) {
+      // Classify. A revert changed no state, and Phase B proved the cause can be
+      // transient (same calldata replayed at its own block returned success), so a
+      // revert is retryable. A send-layer error (nonce, RPC, funds) is not.
+      const retryable = reverted;
+      AT.broadcast = {
+        outcome: reverted ? 'REVERTED' : 'SEND_ERROR',
+        txHash: rcpt?.transactionHash ?? null,
+        receiptStatus: rcpt?.status ?? null,
+        gasUsed: rcpt ? String(rcpt.gasUsed) : null,
+        sendError, retryable,
+      };
+      R.attempts.push(AT);
+
+      if (retryable && attempt < MAX_ATTEMPTS) {
+        R.retry = { retried: true, afterAttempt: attempt,
+          why: 'reverted broadcast classified retryable — re-reading the book and re-sizing at current prices for one more attempt' };
+        continue;                                  // EXACTLY ONE retry
+      }
+      return { ok: false, ...R,
+        reason: reverted ? 'reverted' : 'send_error',
+        detail: reverted
+          ? `the placement transaction reverted on-chain (tx ${rcpt?.transactionHash}). This is a NORMAL, often state-dependent outcome — Phase B observed a revert after a clean simulation where the identical calldata replayed at its own block succeeded, consistent with resting liquidity being taken by a competing fill in the same block. It is not necessarily a sign of a deeper problem. No collateral was committed by a reverted transaction.${attempt >= MAX_ATTEMPTS ? ` One automatic retry was already used; not retrying again.` : ''}`
+          : `the placement could not be submitted: ${sendError}. Classified NOT retryable (a send-layer failure, not an on-chain revert).`,
+        retryable,
+        riskStatus: riskSnapshot() };
+    }
+
+    // ------------------------------------------------- bounded fill resolution
+    const tReceipt = Date.now();
+    const yesAtReceipt = await bal6909(M.yesTokenId), collAtReceipt = await balColl();
+
+    // A read taken immediately after the receipt is not a durable answer: an order
+    // that rests is often taken seconds later by a maker crossing it. So
+    // receipt-time "no fill" conflates two DIFFERENT facts — "still resolving" and
+    // "did not fill". Poll the same ERC6909 read get_position uses, every 5s for up
+    // to 60s. Never reports `false` for an order that could still fill.
+    const POLL_EVERY_MS = 5000, POLL_MAX_MS = 60000;
+    let yesAfter = yesAtReceipt, collAfter = collAtReceipt;
+    let fillStatus, resolution = null, poll = null;
+
+    if (yesAtReceipt > yesBefore) {
+      fillStatus = 'FILLED';
+      resolution = { latencySecondsObserved: 0, polls: 0, resolvedAt: 'receipt',
+        note: 'Already filled at the first post-receipt read — no polling needed.' };
+    } else {
+      const observations = [];
+      let stoppedReason = 'timeout';
+      while (Date.now() - tReceipt < POLL_MAX_MS) {
+        // An order cannot fill once the window expires — stop rather than poll on.
+        if (Math.floor(Date.now() / 1000) >= Number(M.expiry)) { stoppedReason = 'expiry'; break; }
+        await new Promise((r) => setTimeout(r, POLL_EVERY_MS));
+        const b = await bal6909(M.yesTokenId).catch(() => null);
+        const elapsed = Number(((Date.now() - tReceipt) / 1000).toFixed(1));
+        observations.push({ atSeconds: elapsed, erc6909: b === null ? 'READ FAILED' : String(b) });
+        if (b !== null && b > yesBefore) {
+          yesAfter = b; collAfter = await balColl();
+          stoppedReason = 'filled';
+          resolution = { latencySecondsObserved: elapsed, polls: observations.length, resolvedAt: 'poll',
+            granularity: `±${POLL_EVERY_MS / 1000}s — the fill landed somewhere in the ${POLL_EVERY_MS / 1000}s before this observation, so this is an upper bound`,
+            measuredFrom: 'transaction receipt confirmation' };
+          break;
+        }
+      }
+      poll = { everyMs: POLL_EVERY_MS, maxMs: POLL_MAX_MS, count: observations.length, stoppedReason, observations };
+      fillStatus = stoppedReason === 'filled' ? 'FILLED'
+        : stoppedReason === 'expiry' ? 'NOT_FILLED'   // terminal: window closed
+          : 'PENDING';                               // unresolved — NOT "did not fill"
+      if (stoppedReason !== 'filled') collAfter = await balColl();
+    }
+
+    // filled: true | false | null. null === PENDING (unresolved). Callers must not
+    // read null as a non-fill; fillStatus is the signal that keeps them distinct.
+    const filled = fillStatus === 'FILLED' ? true : fillStatus === 'NOT_FILLED' ? false : null;
+    const spentRaw = collBefore - collAfter;
+    const spentUsd = toUsd(spentRaw);
+
+    AT.broadcast = { outcome: 'SUCCESS', txHash: rcpt.transactionHash,
+      receiptStatus: rcpt.status, gasUsed: String(rcpt.gasUsed) };
+    R.attempts.push(AT);
+
+    // Fold the attempt's derived fields up to the top level for callers that do
+    // not walk `attempts` (shape-compatible with Phase B).
+    R.sizing = AT.sizing; R.book = AT.book; R.priceSnap = AT.priceSnap;
+    R.slippage = AT.slippage; R.allowance = AT.allowance;
+    R.simulation = AT.simulation; R.calldata = AT.calldata;
+    R.riskCheck = riskApproved;
+
+    R.fill = {
+      fillStatus, filled,
+      filledAtReceipt: yesAtReceipt > yesBefore,
+      resolution, poll,
+      erc6909Before: String(yesBefore), erc6909AtReceipt: String(yesAtReceipt),
+      erc6909After: String(yesAfter),
+      erc6909Delta: String(yesAfter - yesBefore),
+      filledUnits: formatUnits(yesAfter - yesBefore, DEC),
+      collateralBefore: formatUnits(collBefore, COLL_DEC),
+      collateralAfter: formatUnits(collAfter, COLL_DEC),
+      collateralSpent: formatUnits(spentRaw, COLL_DEC),
+      confirmedBy: 'ERC6909 balance delta + collateral delta (NOT tx status — both a non-fill and a losing redeem also return status=success)',
+      statusMeaning: {
+        FILLED: 'confirmed by ERC6909 balance increase',
+        PENDING: 'order accepted and resting, unresolved at the poll deadline — it may still fill before expiry',
+        NOT_FILLED: 'terminal — the window expired with the order still unfilled',
+      }[fillStatus],
+    };
+
+    // --- dollar-sizing variance, reported rather than assumed
+    if (sizingMode === 'DOLLAR') {
+      const target = Number(targetDollarAmount);
+      R.dollarSizing = {
+        requestedUsd: target,
+        actualCollateralSpentUsd: spentUsd,
+        varianceUsd: Number((spentUsd - target).toFixed(6)),
+        variancePct: target > 0 ? Number((((spentUsd - target) / target) * 100).toFixed(4)) : null,
+        note: 'Variance is expected and is not an error. Quantity is rounded to the minQuantity grid, the fill price is set by the book (a fill can execute at the maker\'s price, better than our limit), and a PENDING or NOT_FILLED order locks collateral at our limit rather than spending it. Compare requestedUsd against actualCollateralSpentUsd rather than assuming the target was hit.',
+      };
+    }
+
+    R.yesTokenId = String(M.yesTokenId); R.expiry = Number(M.expiry);
+
+    // --- risk accounting: record what was actually committed
+    if (spentRaw > 0n) recordSpend({ marketId: market_id, spentUsd });
+    R.riskStatus = riskSnapshot();
+
+    if (fillStatus === 'PENDING') {
+      R.pending = `UNRESOLVED, NOT a non-fill. The order is accepted and resting and may still fill before expiry (${Number(M.expiry)}). Do not treat this as "did not fill". Recheck with get_position({market_id:"${market_id}"}) — its ERC6909 balance is the authoritative holding. If it never fills, the locked collateral is refunded automatically at expiry (PROOF-LOG RUN 3 PART 4).`;
+    } else if (fillStatus === 'NOT_FILLED') {
+      R.restingOrder = 'Window expired with the order unfilled. Its collateral was locked at the order\'s own limit price and is refunded automatically — no cancel needed (PROOF-LOG RUN 3 PART 4).';
+    }
+    return { ok: true, ...R };
+  }
+
+  // Unreachable in practice: the loop either returns or continues, and the final
+  // attempt's failure path returns. Kept so no code path falls off the end.
+  return { ok: false, ...R, reason: 'exhausted_attempts',
+    detail: `all ${MAX_ATTEMPTS} attempts finished without a terminal result.` };
+}
+
+// ============================================================================
+// TOOL 3 — get_position
+// ERC6909 balance for both outcome token ids + the market's on-chain status.
+// ============================================================================
+export async function get_position({ market_id }) {
+  if (!market_id) return { ok: false, refused: true, reason: 'market_id is required.' };
+  const { ex, owner } = ctx({ requireKey: true });
+  const { m: M, source } = await findMarket(market_id);
+  if (!M) return { ok: false, error: `market ${market_id} not found in the live listing or the Finalized scan.` };
+  const DEC = Number(M.quoteDecimals);
+
+  const oc = await ex.client.getMarketOnchain(market_id).catch(() => null);
+  const yes = await bal6909(M.yesTokenId), no = await bal6909(M.noTokenId);
+
+  // status label: 1/Trading is the write gate; finalized/isResolved is the redeem gate
+  const settled = oc?.finalized === true || oc?.isResolved === true;
+  const trading = oc?.status === 1 || oc?.status === 'Trading';
+  const label = trading ? 'Trading' : settled ? 'Finalized' : `status=${oc?.status ?? 'unknown'}`;
+
+  return { ok: true, tool: 'get_position', owner: owner.address,
+    marketId: market_id, asset: M.asset, pool: M.poolAddress,
+    intervalSec: Number(M.intervalSec), expiry: Number(M.expiry), marketSource: source,
+    status: { label, onchainStatus: oc?.status ?? null, tradingGateOpen: trading,
+      settled, finalized: oc?.finalized ?? null, isResolved: oc?.isResolved ?? null,
+      winningOutcome: settled ? (oc?.winningOutcome ?? null) : null,
+      winningOutcomeNote: settled ? null
+        : 'withheld: getMarketOnchain returns winningOutcome=0 as a PRE-SETTLEMENT DEFAULT, which reads as "YES won". Only meaningful once finalized (PROOF-LOG RUN 2).' },
+    position: {
+      yesTokenId: String(M.yesTokenId), yesBalanceRaw: String(yes), yesBalanceUnits: formatUnits(yes, DEC),
+      noTokenId: String(M.noTokenId), noBalanceRaw: String(no), noBalanceUnits: formatUnits(no, DEC),
+      hasPosition: yes > 0n || no > 0n },
+    collateralBalance: formatUnits(await balColl(), COLL_DEC) };
+}
+
+// ============================================================================
+// TOOL 4 — redeem
+// Discovery is listBinaryMarkets({status:"Finalized"}) — NOT default discovery,
+// which is a DISJOINT set and silently reports nothing owed (spec §3 Trap 1).
+// Every leg passes the shared redeemGuard BEFORE any broadcast. A BLOCK refuses
+// and reports; it never falls through to a broadcast.
+// ============================================================================
+export async function redeem({ market_id = null, dry_run = false } = {}) {
+  const { ex, owner } = ctx({ requireKey: true });
+  const R = { tool: 'redeem', owner: owner.address, dryRun: !!dry_run, tx: {},
+    discovery: {}, legs: [], blocked: [], redeemed: [] };
+
+  // --- STEP 5: Finalized-status scan. NOT loadMarkets()/default discovery.
+  const fin = await ex.client.listBinaryMarkets({ status: 'Finalized', limit: 100 }).catch(() => []);
+  R.discovery = { method: 'listBinaryMarkets({status:"Finalized"})', finalizedSeen: fin.length,
+    note: 'Default discovery (listLiveBinaryMarkets/loadMarkets) is a DISJOINT set and would report nothing owed while winnings sit unclaimed (spec §3 Trap 1).' };
+  let candidates = market_id ? fin.filter((m) => m.marketId === market_id) : fin;
+  if (market_id && !candidates.length) {
+    return { ok: false, ...R, reason: `market ${market_id} does not appear in the Finalized scan (${fin.length} finalized seen) — nothing to redeem there yet.` };
+  }
+
+  // --- which finalized markets do we actually hold tokens in?
+  for (const m of candidates) {
+    const DEC = Number(m.quoteDecimals);
+    const yes = await bal6909(m.yesTokenId).catch(() => 0n);
+    const no = await bal6909(m.noTokenId).catch(() => 0n);
+    if (yes === 0n && no === 0n) continue;
+    if (yes > 0n) R.legs.push({ marketId: m.marketId, m, idx: 0, label: 'YES', amount: yes, units: formatUnits(yes, DEC) });
+    if (no > 0n) R.legs.push({ marketId: m.marketId, m, idx: 1, label: 'NO', amount: no, units: formatUnits(no, DEC) });
+  }
+  R.positionsFound = R.legs.length;
+  if (!R.legs.length) {
+    return { ok: true, ...R, legs: [], reason: `no held positions in any of the ${fin.length} finalized markets scanned — nothing owed.` };
+  }
+
+  // --- STEP 5b: ERC6909 operator grant. READ FIRST, never assume. Token-wide,
+  // so it does not recur per market (unlike the per-pool ERC20 allowance).
+  let isOp = null, opErr = null;
+  try {
+    isOp = await ctx().pc.readContract({ address: OUTCOME_TOKEN, abi: SDK.erc6909Abi,
+      functionName: 'isOperator', args: [owner.address, MODULE] });
+  } catch (e) { opErr = e.shortMessage ?? e.message; }
+  R.erc6909Operator = { token: OUTCOME_TOKEN, module: MODULE, isOperatorBefore: isOp, readError: opErr };
+
+  if (isOp !== true) {
+    const setOperatorAbi = [{ type: 'function', name: 'setOperator',
+      inputs: [{ name: 'operator', type: 'address' }, { name: 'approved', type: 'bool' }],
+      outputs: [{ name: '', type: 'bool' }], stateMutability: 'nonpayable' }];
+    const setOpData = encodeFunctionData({ abi: setOperatorAbi, functionName: 'setOperator', args: [MODULE, true] });
+    const opSim = await rawCall({ from: owner.address, to: OUTCOME_TOKEN, data: setOpData });
+    R.erc6909Operator.simulation = opSim.ok ? 'NO REVERT' : decodeRevert(opSim.data);
+    if (!opSim.ok) {
+      R.erc6909Operator.case = 'SIMULATION_REVERTED — NOT broadcast';
+      return { ok: false, ...R, legs: jsonSafe(R.legs.map(stripM)),
+        reason: `ERC6909 setOperator simulation reverted (${R.erc6909Operator.simulation}); redeem would fail with InsufficientPermission(). Not broadcasting blind.` };
+    }
+    if (dry_run) {
+      R.erc6909Operator.case = 'NOT GRANTED — would broadcast setOperator (dry_run, skipped)';
+    } else {
+      await send(R.tx, 'setOperator_module', { to: OUTCOME_TOKEN, data: setOpData });
+      const nowOp = await ctx().pc.readContract({ address: OUTCOME_TOKEN, abi: SDK.erc6909Abi,
+        functionName: 'isOperator', args: [owner.address, MODULE] }).catch(() => null);
+      R.erc6909Operator.case = nowOp === true ? 'BROADCAST — granted, reads back true' : `BROADCAST — reads back ${nowOp}`;
+      R.erc6909Operator.isOperatorAfter = nowOp;
+    }
+  } else {
+    R.erc6909Operator.case = 'ALREADY GRANTED — redundant broadcast SKIPPED (token-wide, does not recur per market)';
+  }
+
+  // --- STEP 6: guard EVERY leg before any broadcast.
+  for (const leg of R.legs) {
+    const m = leg.m;
+    const oc = await ex.client.getMarketOnchain(leg.marketId).catch(() => null);
+    const g = redeemGuard({ leg, oc, indexerWinningOutcome: m.winningOutcome });
+    const entry = { marketId: leg.marketId, asset: m.asset, outcomeIdx: leg.idx, label: leg.label,
+      amount: String(leg.amount), units: leg.units,
+      guard: { allow: g.allow, reason: g.reason, winOnchain: g.winOnchain,
+        winIndexed: g.winIndexed, settledOnchain: g.settledOnchain } };
+
+    if (!g.allow) {
+      // Refuse and report. Same behaviour as the proven script: NOT broadcast,
+      // position left intact rather than burned for zero.
+      const still = await bal6909(leg.idx === 0 ? m.yesTokenId : m.noTokenId).catch(() => null);
+      entry.broadcast = false;
+      entry.outcome = `BLOCKED — NOT BROADCAST. Position left intact (${still ?? leg.amount} tokens preserved, not burned).`;
+      entry.tokensPreserved = String(still ?? leg.amount);
+      R.blocked.push(entry);
+      continue;
+    }
+
+    if (dry_run) {
+      entry.broadcast = false; entry.outcome = 'ALLOW — would broadcast (dry_run, skipped)';
+      R.redeemed.push(entry); continue;
+    }
+
+    const data = encodeFunctionData({ abi: SDK.binaryModuleWriteAbi, functionName: 'redeem',
+      args: [Number(m.operatorId), m.venueId, leg.marketId, leg.idx, leg.amount] });
+    const pre = await rawCall({ from: owner.address, to: A.binaryModule, data });
+    entry.simulation = pre.ok ? 'NO REVERT' : decodeRevert(pre.data);
+    if (!pre.ok) { entry.broadcast = false; entry.outcome = `simulation reverted — NOT broadcast`; R.blocked.push(entry); continue; }
+
+    const collPre = await balColl(), tokPre = await bal6909(leg.idx === 0 ? m.yesTokenId : m.noTokenId);
+    await send(R.tx, `redeem_${leg.label}_${leg.marketId.slice(-6)}`, { to: A.binaryModule, data });
+    const collPost = await balColl(), tokPost = await bal6909(leg.idx === 0 ? m.yesTokenId : m.noTokenId);
+    const payout = collPost - collPre;
+
+    entry.broadcast = true;
+    entry.payout = { collateralBefore: formatUnits(collPre, COLL_DEC), collateralAfter: formatUnits(collPost, COLL_DEC),
+      payoutUnits: formatUnits(payout, COLL_DEC), payoutRaw: String(payout), nonZero: payout > 0n,
+      erc6909Before: String(tokPre), erc6909After: String(tokPost),
+      confirmedBy: 'tUSDC balance delta + ERC6909 burn (NOT tx status — a losing redeem also returns status=success)' };
+    entry.outcome = payout > 0n ? 'REDEEMED — non-zero payout confirmed by balance delta' : 'BROADCAST BUT ZERO PAYOUT';
+    // Feed the payout into risk accounting so it reduces the day's drawdown.
+    if (payout > 0n) recordPayout({ marketId: leg.marketId, payoutUsd: Number(formatUnits(payout, COLL_DEC)) });
+    R.redeemed.push(entry);
+  }
+
+  R.legs = jsonSafe(R.legs.map(stripM));
+  R.riskStatus = riskSnapshot();
+  return { ok: true, ...R,
+    summary: { positionsFound: R.positionsFound, redeemedCount: R.redeemed.length, blockedCount: R.blocked.length,
+      totalPayoutUnits: R.redeemed.reduce((a, e) => a + Number(e.payout?.payoutUnits ?? 0), 0).toFixed(6) } };
+}
+const stripM = ({ m, ...rest }) => ({ ...rest, amount: String(rest.amount) });

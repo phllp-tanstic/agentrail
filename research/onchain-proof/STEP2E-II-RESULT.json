@@ -1,0 +1,60 @@
+{
+  "verify": [
+    {
+      "label": "module-impl",
+      "addr": "0xdf87ac5c4760e2f1dd78e054ce0629a26a4ca5ca",
+      "codeLen": 31419,
+      "kind": "contract",
+      "isVerified": false,
+      "name": null,
+      "fnCount": 0,
+      "orderRelatedFns": []
+    },
+    {
+      "label": "adapter-BTC",
+      "addr": "0x42040dc49c2df9fa2e85fb97a342cb4b0de16791",
+      "codeLen": 291,
+      "kind": "contract",
+      "isVerified": false,
+      "name": null,
+      "fnCount": 0,
+      "orderRelatedFns": []
+    },
+    {
+      "label": "adapter-ETH",
+      "addr": "0x554080c97adb99ddafeee49e7357d1dc07c8518f",
+      "codeLen": 291,
+      "kind": "contract",
+      "isVerified": false,
+      "name": null,
+      "fnCount": 0,
+      "orderRelatedFns": []
+    },
+    {
+      "label": "keeper-0x2f",
+      "addr": "0xff825f7b605f644a76138659c8bdc1d178e739db",
+      "codeLen": 0,
+      "kind": "EOA",
+      "isVerified": false,
+      "name": null,
+      "fnCount": 0,
+      "orderRelatedFns": []
+    }
+  ],
+  "selectorDB": {
+    "0x5b1ffcf2": null,
+    "0x88cb9474": null,
+    "0x4efe024a": null,
+    "0xf5b7ba39": [
+      "setOutcomeToken(address)"
+    ],
+    "0x3d312f6d": [
+      "setAdapterApproved(address,bool)"
+    ],
+    "0x147607c3": null,
+    "0x8e3aeebc": null,
+    "0x2f2461cd": null,
+    "0x5d97c566": null,
+    "0x718c2d4d": null
+  }
+}

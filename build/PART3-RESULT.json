@@ -1,0 +1,105 @@
+{
+  "owner": "0x291411D322ECBd4E9b86F05077c0931586142990",
+  "startedAt": "2026-08-25T00:21:19.296Z",
+  "maxAttempts": 5,
+  "attempts": [
+    {
+      "attempt": 1,
+      "marketId": "0x0000000000000000000000000000000000000000000000000000000000008c07",
+      "asset": "BTC",
+      "pool": "0xf43f41ea12aebcc7e09ac8da564317a753fd75ad",
+      "secsToExpiry": 218,
+      "yesAskDepth": "990000000",
+      "bestYesAsk": "364000",
+      "statusGate": {
+        "status": 1,
+        "open": true
+      },
+      "snappedBid": "384000",
+      "onTick": true,
+      "yesBefore": "0",
+      "yesAfter": "0",
+      "yesDelta": "0",
+      "filled": false,
+      "collateralSpent": "-384000",
+      "result": "NO_FILL"
+    },
+    {
+      "attempt": 2,
+      "marketId": "0x0000000000000000000000000000000000000000000000000000000000008c08",
+      "asset": "ETH",
+      "pool": "0x0914a6be25dad9080060da535d9ea1d624b39b3c",
+      "secsToExpiry": 208,
+      "yesAskDepth": "990000000",
+      "bestYesAsk": "614000",
+      "statusGate": {
+        "status": 1,
+        "open": true
+      },
+      "snappedBid": "634000",
+      "onTick": true,
+      "yesBefore": "0",
+      "yesAfter": "1000000",
+      "yesDelta": "1000000",
+      "filled": true,
+      "collateralSpent": "-614000",
+      "settledStatus": 4,
+      "finalized": true,
+      "winningOutcome": 0,
+      "indexerWinningOutcome": 0,
+      "guard": {
+        "allow": true,
+        "reason": "WINNER — outcomeIdx=0 === on-chain winningOutcome=0",
+        "winOnchain": 0,
+        "winIndexed": 0,
+        "settledOnchain": true
+      },
+      "result": "WIN_PAYOUT_CONFIRMED",
+      "redeemed": "1000000",
+      "collateralPreRedeem": "9998444000",
+      "collateralPostRedeem": "9999444000",
+      "payout": "1000000",
+      "payoutNonZero": true,
+      "erc6909Pre": "1000000",
+      "erc6909Post": "0"
+    }
+  ],
+  "tx": {
+    "a1_approve": {
+      "hash": "0x0454e3f52a527422b74764e24b899502f811ad89c0fba32dcdbf7b736b3845a9",
+      "status": "success",
+      "block": 470443850,
+      "gasUsed": "259745",
+      "logs": 1
+    },
+    "a1_placeBinaryOrder_BUY_YES": {
+      "hash": "0x5106bf8150f67794932355159959264a74363eb335bf50fc387e50f8067d6d02",
+      "status": "success",
+      "block": 470443869,
+      "gasUsed": "3280841",
+      "logs": 4
+    },
+    "a2_approve": {
+      "hash": "0xedbdc6d2088b8eddfae84a3bee201ec4e91c9823cbe9cb92b9b6e440817fa3e8",
+      "status": "success",
+      "block": 470443907,
+      "gasUsed": "259745",
+      "logs": 1
+    },
+    "a2_placeBinaryOrder_BUY_YES": {
+      "hash": "0xc5a1e655d611dc5fbb3ea4eb80e4bd1efc1538bdecc354f4733d270276685d2b",
+      "status": "success",
+      "block": 470443940,
+      "gasUsed": "1425054",
+      "logs": 8
+    },
+    "a2_redeem_YES_WINNER": {
+      "hash": "0x9d97aeedd655066a8cd906e2fcf47952b74948ec68f40b3739bd1e3edeca4366",
+      "status": "success",
+      "block": 470446008,
+      "gasUsed": "472707",
+      "logs": 5
+    }
+  },
+  "verdict": "PASS — non-zero winning payout confirmed by balance delta"
+}

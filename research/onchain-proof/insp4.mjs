@@ -1,0 +1,10 @@
+import { SomniaMarkets, SOMNIA_TESTNET_ADDRESSES } from '@somnia-chain/markets-sdk';
+import { somniaShannon } from '@somnia-chain/markets-sdk/chains';
+const ex = new SomniaMarkets({ chain: somniaShannon, rpcUrl:'https://api.infra.testnet.somnia.network', indexerUrl:'https://dev.smk.somnia.host/v1/graphql', addresses: SOMNIA_TESTNET_ADDRESSES });
+const meths = o => { const s=new Set(); let p=o; while(p&&p!==Object.prototype){ for(const k of Object.getOwnPropertyNames(p)) s.add(k); p=Object.getPrototypeOf(p);} return [...s].sort(); };
+const cm = meths(ex.client);
+console.log('CLIENT methods matching market/binary/onchain/list/load:');
+console.log(cm.filter(k=>/market|binary|onchain|list|load/i.test(k)).join('\n'));
+console.log('\nEX (SomniaMarkets) methods matching market/fetch:');
+console.log(meths(ex).filter(k=>/market|fetch/i.test(k)).slice(0,40).join('\n'));
+process.exit(0);

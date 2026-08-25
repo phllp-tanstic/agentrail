@@ -1,0 +1,221 @@
+{
+  "api": "blockscout v2",
+  "checks": {
+    "verified": [
+      {
+        "net": "mainnet",
+        "host": "https://explorer.somnia.network",
+        "label": "implementation",
+        "addr": "0x48e523c9f22f98548d263f0ad444d732e5202c0e",
+        "status": 200,
+        "name": null,
+        "isVerified": false,
+        "lang": null,
+        "compiler": null,
+        "sourceLen": 0,
+        "abiEntries": 0
+      },
+      {
+        "net": "mainnet",
+        "host": "https://explorer.somnia.network",
+        "label": "beacon",
+        "addr": "0x85c01b5ef4f4ed59cac69749565e309f01b14dbc",
+        "status": 200,
+        "name": "UpgradeableBeacon",
+        "isVerified": true,
+        "lang": "solidity",
+        "compiler": "v0.8.34+commit.80d5c536",
+        "sourceLen": 2219,
+        "abiEntries": 11
+      },
+      {
+        "net": "testnet",
+        "host": "https://shannon-explorer.somnia.network",
+        "label": "implementation",
+        "addr": "0x48e523c9f22f98548d263f0ad444d732e5202c0e",
+        "status": 200,
+        "name": null,
+        "isVerified": false,
+        "lang": null,
+        "compiler": null,
+        "sourceLen": 0,
+        "abiEntries": 0
+      },
+      {
+        "net": "testnet",
+        "host": "https://shannon-explorer.somnia.network",
+        "label": "beacon",
+        "addr": "0x85c01b5ef4f4ed59cac69749565e309f01b14dbc",
+        "status": 200,
+        "name": "UpgradeableBeacon",
+        "isVerified": true,
+        "lang": "solidity",
+        "compiler": "v0.8.34+commit.80d5c536",
+        "sourceLen": 2219,
+        "abiEntries": 11
+      }
+    ],
+    "anyVerified": true,
+    "txHistory": [
+      {
+        "pool": "0xd22908ed947495d4d3dac8c75e75a5cf495ff736",
+        "inspected": 168,
+        "pages": 4,
+        "sel_5d97c566": 0,
+        "sel_5d97c566_success": 0,
+        "sel_718c2d4d": 0,
+        "sel_718c2d4d_success": 0,
+        "topSelectors": [
+          [
+            "0x2f2461cd",
+            168
+          ]
+        ]
+      },
+      {
+        "pool": "0x39b910486dbc82510d0990caa8b4af05da864bb4",
+        "inspected": 175,
+        "pages": 4,
+        "sel_5d97c566": 0,
+        "sel_5d97c566_success": 0,
+        "sel_718c2d4d": 0,
+        "sel_718c2d4d_success": 0,
+        "topSelectors": [
+          [
+            "0x2f2461cd",
+            175
+          ]
+        ]
+      },
+      {
+        "pool": "0x3a7be3355ca90e94efa38a7e86abe98ba5b98a75",
+        "inspected": 82,
+        "pages": 2,
+        "sel_5d97c566": 0,
+        "sel_5d97c566_success": 0,
+        "sel_718c2d4d": 0,
+        "sel_718c2d4d_success": 0,
+        "topSelectors": [
+          [
+            "0x2f2461cd",
+            82
+          ]
+        ]
+      },
+      {
+        "pool": "0x843ca845bbad0db0954700264901de5e451940ae",
+        "inspected": 87,
+        "pages": 2,
+        "sel_5d97c566": 0,
+        "sel_5d97c566_success": 0,
+        "sel_718c2d4d": 0,
+        "sel_718c2d4d_success": 0,
+        "topSelectors": [
+          [
+            "0x2f2461cd",
+            87
+          ]
+        ]
+      }
+    ],
+    "successfulOrderFor": [],
+    "successfulOrderSelf": [],
+    "distinctForSenders": [],
+    "distinctSelfSenders": [],
+    "eventTopics": [
+      {
+        "label": "beacon",
+        "addr": "0x85c01b5ef4f4ed59cac69749565e309f01b14dbc",
+        "sampled": 2,
+        "topics": [
+          {
+            "topic0": "0xbc7cd75a20ee27fd9adebab32041f755214dbc6bffa90cc0225b39da2e5c2d3b",
+            "count": 1,
+            "decoded": "Upgraded(address indexed implementation)"
+          },
+          {
+            "topic0": "0x8be0079c531659141344cd1fd0a4f28419497f9722a3daafe3b4186f6b6457e0",
+            "count": 1,
+            "decoded": "OwnershipTransferred(address indexed previousOwner, address indexed newOwner)"
+          }
+        ]
+      },
+      {
+        "label": "implementation",
+        "addr": "0x48e523c9f22f98548d263f0ad444d732e5202c0e",
+        "sampled": 1,
+        "topics": [
+          {
+            "topic0": "0xc7f505b2f371ae2175ee4913f4499e1f2633a7b5936321eed1cdaeb6115181d2",
+            "count": 1,
+            "decoded": "Initialized(uint64 version)"
+          }
+        ]
+      },
+      {
+        "label": "hot pool BTC",
+        "addr": "0xd22908ed947495d4d3dac8c75e75a5cf495ff736",
+        "sampled": 50,
+        "topics": [
+          {
+            "topic0": "0x9f15802f3d01a772129264277df8d4179b39f69e1604da331602636c0985d45f",
+            "count": 1,
+            "decoded": null
+          },
+          {
+            "topic0": "0xd90f62f61ee2f606b132cfdfd883ddd079228b6fd6bffd9d7cf848daf824639d",
+            "count": 12,
+            "decoded": null
+          },
+          {
+            "topic0": "0x74d63d9f1c4826854a227aa41c4a51723497a608aa14aa50e8153744f081d4e6",
+            "count": 12,
+            "decoded": null
+          },
+          {
+            "topic0": "0x06ff08ed6b6987bb7df963009d8b54dc03988f4e465c009924929bb010fe03e7",
+            "count": 12,
+            "decoded": null
+          },
+          {
+            "topic0": "0xcdd45acd62788abc10f79d86fac34df2a63e1a3b20f061c5bcf431ff6a09b866",
+            "count": 13,
+            "decoded": null
+          }
+        ]
+      },
+      {
+        "label": "hot pool ETH",
+        "addr": "0x39b910486dbc82510d0990caa8b4af05da864bb4",
+        "sampled": 50,
+        "topics": [
+          {
+            "topic0": "0x9f15802f3d01a772129264277df8d4179b39f69e1604da331602636c0985d45f",
+            "count": 1,
+            "decoded": null
+          },
+          {
+            "topic0": "0xd90f62f61ee2f606b132cfdfd883ddd079228b6fd6bffd9d7cf848daf824639d",
+            "count": 12,
+            "decoded": null
+          },
+          {
+            "topic0": "0x74d63d9f1c4826854a227aa41c4a51723497a608aa14aa50e8153744f081d4e6",
+            "count": 12,
+            "decoded": null
+          },
+          {
+            "topic0": "0x06ff08ed6b6987bb7df963009d8b54dc03988f4e465c009924929bb010fe03e7",
+            "count": 12,
+            "decoded": null
+          },
+          {
+            "topic0": "0xcdd45acd62788abc10f79d86fac34df2a63e1a3b20f061c5bcf431ff6a09b866",
+            "count": 13,
+            "decoded": null
+          }
+        ]
+      }
+    ]
+  }
+}

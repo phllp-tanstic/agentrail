@@ -1,0 +1,298 @@
+{
+  "testnet": {
+    "label": "TESTNET (Shannon 50312)",
+    "pool": "0xc09e4a5bdee2899962727125fb5eaeb896798e46",
+    "registry": "0x15C7e8CE38F021c5b45d098AaD788f63090bF20A",
+    "net": "testnet",
+    "calldataFor": "0x5d97c56600000000000000000000000019e7e376e7c213b7e7e7e46cc70a5dd086daff2a000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000975e0000000000000000000000000000000000000000000000000000000000000271000000000000000000000000000000000000000000000000018cea29da08fa80000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "calldataSelf": "0x718c2d4d000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000975e0000000000000000000000000000000000000000000000000000000000000271000000000000000000000000000000000000000000000000018cea29da08fa80000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "paths": {
+      "placeBinaryOrderFor (delegated)": {
+        "selector": "0x5d97c566",
+        "revertSelector": "0x3fb0ba2e",
+        "revertName": "OnlyApprovedContracts()",
+        "revertRaw": "0x3fb0ba2e"
+      },
+      "placeBinaryOrder (self)": {
+        "selector": "0x718c2d4d",
+        "revertSelector": "0xfb8f41b2",
+        "revertName": "ERC20InsufficientAllowance(address,uint256,uint256)",
+        "revertRaw": "0xfb8f41b2000000000000000000000000c09e4a5bdee2899962727125fb5eaeb896798e4600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001838"
+      }
+    },
+    "callTree": [
+      {
+        "depth": 0,
+        "type": "CALL",
+        "to": "0xc09e4a5bdee2899962727125fb5eaeb896798e46",
+        "name": "the POOL itself",
+        "input4": "0x5d97c566",
+        "error": "EXECUTION_REVERTED",
+        "output": "0x3fb0ba2e"
+      },
+      {
+        "depth": 1,
+        "type": "STATICCALL",
+        "to": "0x85c01b5ef4f4ed59cac69749565e309f01b14dbc",
+        "name": "(unrecognised)",
+        "input4": "0x5c60da1b",
+        "error": null,
+        "output": "0x00000000000000000000000048e523c9f22f98548d263f0ad444d732e5202c0e"
+      },
+      {
+        "depth": 1,
+        "type": "DELEGATECALL",
+        "to": "0x48e523c9f22f98548d263f0ad444d732e5202c0e",
+        "name": "(unrecognised)",
+        "input4": "0x5d97c566",
+        "error": "EXECUTION_REVERTED",
+        "output": "0x3fb0ba2e"
+      }
+    ],
+    "touchedRegistryViaCall": false,
+    "accessed": [
+      {
+        "addr": "0x48e523c9f22f98548d263f0ad444d732e5202c0e",
+        "name": "(unrecognised)",
+        "codeLen": 40566,
+        "slotsRead": 0,
+        "storage": {}
+      },
+      {
+        "addr": "0x85c01b5ef4f4ed59cac69749565e309f01b14dbc",
+        "name": "(unrecognised)",
+        "codeLen": 605,
+        "slotsRead": 1,
+        "storage": {
+          "0x0000000000000000000000000000000000000000000000000000000000000001": "0x00000000000000000000000048e523c9f22f98548d263f0ad444d732e5202c0e"
+        }
+      },
+      {
+        "addr": "0xc09e4a5bdee2899962727125fb5eaeb896798e46",
+        "name": "the POOL itself",
+        "codeLen": 291,
+        "slotsRead": 1,
+        "storage": {
+          "0x8e15f0fff8607b3d9deef83a7bb516ae831cbeeff9c9cb249b4a76e62ab5d9f7": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      },
+      {
+        "addr": "0xf790ece943559b79e17d327885df0ba94cf68151",
+        "name": "operator EOA (from)",
+        "codeLen": 0,
+        "slotsRead": 0,
+        "storage": {}
+      }
+    ],
+    "registryAccessed": false,
+    "opSummary": [
+      {
+        "pc": 66,
+        "op": "STATICCALL",
+        "depth": 1,
+        "top": [
+          "0x80",
+          "0x85c01b5ef4f4ed59cac69749565e309f01b14dbc",
+          "0x1fee328"
+        ]
+      },
+      {
+        "pc": 366,
+        "op": "SLOAD",
+        "depth": 2,
+        "top": [
+          "0x5c60da1b",
+          "0x1"
+        ]
+      },
+      {
+        "pc": 221,
+        "op": "DELEGATECALL",
+        "depth": 1,
+        "top": [
+          "0x0",
+          "0x48e523c9f22f98548d263f0ad444d732e5202c0e",
+          "0x1fee0af"
+        ]
+      },
+      {
+        "pc": 8264,
+        "op": "SLOAD",
+        "depth": 2,
+        "top": [
+          "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+          "0xff",
+          "0x8e15f0fff8607b3d9deef83a7bb516ae831cbeeff9c9cb249b4a76e62ab5d9f7"
+        ]
+      },
+      {
+        "pc": 7181,
+        "op": "REVERT",
+        "depth": 2,
+        "top": [
+          "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+          "0x4",
+          "0x0"
+        ]
+      },
+      {
+        "pc": 236,
+        "op": "REVERT",
+        "depth": 1,
+        "top": [
+          "0x4",
+          "0x0"
+        ]
+      }
+    ],
+    "totalSloads": 2
+  },
+  "mainnetETH": {
+    "label": "MAINNET (5031) ETH pool",
+    "pool": "0x39b910486dbc82510d0990caa8b4af05da864bb4",
+    "registry": "0xE7a190736B6024a4DbafadC04E283075877005ce",
+    "net": "mainnet",
+    "calldataFor": "0x5d97c56600000000000000000000000019e7e376e7c213b7e7e7e46cc70a5dd086daff2a0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000089aaeb710be0000000000000000000000000000000000000000000000000000002386f26fc1000000000000000000000000000000000000000000000000000018cea2da655f9a0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "calldataSelf": "0x718c2d4d0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000089aaeb710be0000000000000000000000000000000000000000000000000000002386f26fc1000000000000000000000000000000000000000000000000000018cea2da655f9a0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "paths": {
+      "placeBinaryOrderFor (delegated)": {
+        "selector": "0x5d97c566",
+        "revertSelector": "0x3fb0ba2e",
+        "revertName": "OnlyApprovedContracts()",
+        "revertRaw": "0x3fb0ba2e"
+      },
+      "placeBinaryOrder (self)": {
+        "selector": "0x718c2d4d",
+        "revertSelector": "0xa491421c",
+        "revertName": "TradingNotActive()",
+        "revertRaw": "0xa491421c"
+      }
+    },
+    "callTree": [
+      {
+        "depth": 0,
+        "type": "CALL",
+        "to": "0x39b910486dbc82510d0990caa8b4af05da864bb4",
+        "name": "the POOL itself",
+        "input4": "0x5d97c566",
+        "error": "EXECUTION_REVERTED",
+        "output": "0x3fb0ba2e"
+      },
+      {
+        "depth": 1,
+        "type": "STATICCALL",
+        "to": "0x85c01b5ef4f4ed59cac69749565e309f01b14dbc",
+        "name": "(unrecognised)",
+        "input4": "0x5c60da1b",
+        "error": null,
+        "output": "0x00000000000000000000000048e523c9f22f98548d263f0ad444d732e5202c0e"
+      },
+      {
+        "depth": 1,
+        "type": "DELEGATECALL",
+        "to": "0x48e523c9f22f98548d263f0ad444d732e5202c0e",
+        "name": "(unrecognised)",
+        "input4": "0x5d97c566",
+        "error": "EXECUTION_REVERTED",
+        "output": "0x3fb0ba2e"
+      }
+    ],
+    "touchedRegistryViaCall": false,
+    "accessed": [
+      {
+        "addr": "0x39b910486dbc82510d0990caa8b4af05da864bb4",
+        "name": "the POOL itself",
+        "codeLen": 291,
+        "slotsRead": 1,
+        "storage": {
+          "0x8e15f0fff8607b3d9deef83a7bb516ae831cbeeff9c9cb249b4a76e62ab5d9f7": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      },
+      {
+        "addr": "0x48e523c9f22f98548d263f0ad444d732e5202c0e",
+        "name": "(unrecognised)",
+        "codeLen": 40566,
+        "slotsRead": 0,
+        "storage": {}
+      },
+      {
+        "addr": "0x85c01b5ef4f4ed59cac69749565e309f01b14dbc",
+        "name": "(unrecognised)",
+        "codeLen": 605,
+        "slotsRead": 1,
+        "storage": {
+          "0x0000000000000000000000000000000000000000000000000000000000000001": "0x00000000000000000000000048e523c9f22f98548d263f0ad444d732e5202c0e"
+        }
+      },
+      {
+        "addr": "0xf790ece943559b79e17d327885df0ba94cf68151",
+        "name": "operator EOA (from)",
+        "codeLen": 0,
+        "slotsRead": 0,
+        "storage": {}
+      }
+    ],
+    "registryAccessed": false,
+    "opSummary": [
+      {
+        "pc": 66,
+        "op": "STATICCALL",
+        "depth": 1,
+        "top": [
+          "0x80",
+          "0x85c01b5ef4f4ed59cac69749565e309f01b14dbc",
+          "0x1fee328"
+        ]
+      },
+      {
+        "pc": 366,
+        "op": "SLOAD",
+        "depth": 2,
+        "top": [
+          "0x5c60da1b",
+          "0x1"
+        ]
+      },
+      {
+        "pc": 221,
+        "op": "DELEGATECALL",
+        "depth": 1,
+        "top": [
+          "0x0",
+          "0x48e523c9f22f98548d263f0ad444d732e5202c0e",
+          "0x1fee0af"
+        ]
+      },
+      {
+        "pc": 8264,
+        "op": "SLOAD",
+        "depth": 2,
+        "top": [
+          "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+          "0xff",
+          "0x8e15f0fff8607b3d9deef83a7bb516ae831cbeeff9c9cb249b4a76e62ab5d9f7"
+        ]
+      },
+      {
+        "pc": 7181,
+        "op": "REVERT",
+        "depth": 2,
+        "top": [
+          "0x19e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+          "0x4",
+          "0x0"
+        ]
+      },
+      {
+        "pc": 236,
+        "op": "REVERT",
+        "depth": 1,
+        "top": [
+          "0x4",
+          "0x0"
+        ]
+      }
+    ],
+    "totalSloads": 2
+  }
+}

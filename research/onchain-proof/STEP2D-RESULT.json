@@ -1,0 +1,110 @@
+{
+  "checks": {
+    "explorer": [
+      {
+        "net": "mainnet",
+        "host": "https://explorer.somnia.network",
+        "httpStatus": 200,
+        "contractName": "",
+        "hasSource": false,
+        "sourceLen": 0,
+        "abiLen": 0
+      },
+      {
+        "net": "mainnet",
+        "host": "https://somnia.blockscout.com",
+        "httpStatus": 404,
+        "body": "default backend - 404"
+      },
+      {
+        "net": "mainnet",
+        "host": "https://mainnet.somnia.w3us.site",
+        "httpStatus": 200,
+        "contractName": "",
+        "hasSource": false,
+        "sourceLen": 0,
+        "abiLen": 0
+      },
+      {
+        "net": "testnet",
+        "host": "https://shannon-explorer.somnia.network",
+        "httpStatus": 200,
+        "contractName": "",
+        "hasSource": false,
+        "sourceLen": 0,
+        "abiLen": 0
+      },
+      {
+        "net": "testnet",
+        "host": "https://somnia-testnet.socialscan.io",
+        "err": "fetch failed"
+      },
+      {
+        "net": "testnet",
+        "host": "https://somnia-devnet.socialscan.io",
+        "err": "fetch failed"
+      }
+    ],
+    "verifiedFound": false,
+    "logs": {
+      "beacon": {
+        "addr": "0x85c01b5ef4f4ed59cac69749565e309f01b14dbc",
+        "error": "{\"code\":-1,\"message\":\"block range exceeds 1000\",\"data\":null}"
+      },
+      "implementation": {
+        "addr": "0x48e523c9f22f98548d263f0ad444d732e5202c0e",
+        "error": "{\"code\":-1,\"message\":\"block range exceeds 1000\",\"data\":null}"
+      },
+      "hot pool BTC": {
+        "addr": "0xd22908ed947495d4d3dac8c75e75a5cf495ff736",
+        "error": "{\"code\":-1,\"message\":\"block range exceeds 1000\",\"data\":null}"
+      },
+      "hot pool ETH": {
+        "addr": "0x39b910486dbc82510d0990caa8b4af05da864bb4",
+        "error": "{\"code\":-1,\"message\":\"block range exceeds 1000\",\"data\":null}"
+      }
+    },
+    "orderFor": {
+      "scanned": [
+        {
+          "pool": "0xd22908ed947495d4d3dac8c75e75a5cf495ff736",
+          "error": "{\"code\":-1,\"message\":\"block range exceeds 1000\",\"data\":null}"
+        },
+        {
+          "pool": "0x39b910486dbc82510d0990caa8b4af05da864bb4",
+          "error": "{\"code\":-1,\"message\":\"block range exceeds 1000\",\"data\":null}"
+        },
+        {
+          "pool": "0x3a7be3355ca90e94efa38a7e86abe98ba5b98a75",
+          "error": "{\"code\":-1,\"message\":\"block range exceeds 1000\",\"data\":null}"
+        },
+        {
+          "pool": "0xa475e7cff65bd47c3a0783d071e7075e035048a8",
+          "error": "{\"code\":-1,\"message\":\"block range exceeds 1000\",\"data\":null}"
+        },
+        {
+          "pool": "0x7539bfac347f92534462ef1f4dca3f1b8b1dc998",
+          "error": "{\"code\":-1,\"message\":\"block range exceeds 1000\",\"data\":null}"
+        },
+        {
+          "pool": "0x363deb12f640de39b0575d158325dad098ba0d02",
+          "error": "{\"code\":-1,\"message\":\"block range exceeds 1000\",\"data\":null}"
+        },
+        {
+          "pool": "0x68af9113c89acdbd0377f20b33b22ba8bf5e8eb3",
+          "error": "{\"code\":-1,\"message\":\"block range exceeds 1000\",\"data\":null}"
+        },
+        {
+          "pool": "0x843ca845bbad0db0954700264901de5e451940ae",
+          "error": "{\"code\":-1,\"message\":\"block range exceeds 1000\",\"data\":null}"
+        }
+      ],
+      "forFound": [],
+      "selfFound": [],
+      "successfulForCount": 0,
+      "successfulSelfCount": 0,
+      "distinctForSenders": [],
+      "distinctSelfSenders": []
+    }
+  }
+}

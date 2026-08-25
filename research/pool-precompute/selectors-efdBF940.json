@@ -1,0 +1,177 @@
+[
+  {
+    "sel": "0x03684f95",
+    "names": []
+  },
+  {
+    "sel": "0x3a0afa7f",
+    "names": []
+  },
+  {
+    "sel": "0x4381b341",
+    "names": []
+  },
+  {
+    "sel": "0x443635a3",
+    "names": []
+  },
+  {
+    "sel": "0x485cc955",
+    "names": [
+      "watch_tg_invmru_10757d42(bool,bool)",
+      "watch_tg_invmru_7bd442a(uint256,address,uint256)",
+      "initialize(address,address)"
+    ]
+  },
+  {
+    "sel": "0x4f1ef286",
+    "names": [
+      "upgradeToAndCall_23573451()",
+      "upgradeToAndCall(address,bytes)"
+    ]
+  },
+  {
+    "sel": "0x52d1902d",
+    "names": [
+      "proxiableUUID()"
+    ]
+  },
+  {
+    "sel": "0x715018a6",
+    "names": [
+      "renounceOwnership()"
+    ]
+  },
+  {
+    "sel": "0x79ba5097",
+    "names": [
+      "acceptOwnership()"
+    ]
+  },
+  {
+    "sel": "0x7bbc67e6",
+    "names": []
+  },
+  {
+    "sel": "0x7f1e31ce",
+    "names": []
+  },
+  {
+    "sel": "0x8da5cb5b",
+    "names": [
+      "ideal_warn_timed(uint256,uint128)",
+      "owner()"
+    ]
+  },
+  {
+    "sel": "0xad3cb1cc",
+    "names": [
+      "UPGRADE_INTERFACE_VERSION()"
+    ]
+  },
+  {
+    "sel": "0xaf1e64a8",
+    "names": []
+  },
+  {
+    "sel": "0xccb0797d",
+    "names": []
+  },
+  {
+    "sel": "0xcdf7260d",
+    "names": []
+  },
+  {
+    "sel": "0xe30c3978",
+    "names": [
+      "pendingOwner()"
+    ]
+  },
+  {
+    "sel": "0xf2fde38b",
+    "names": [
+      "_SIMONdotBLACK_(int8[],uint256,address,bytes8,int96)",
+      "transferOwnership(address)"
+    ]
+  },
+  {
+    "sel": "0xccea9e6f",
+    "names": [
+      "InvalidOperator()"
+    ]
+  },
+  {
+    "sel": "0x019daeeb",
+    "names": []
+  },
+  {
+    "sel": "0x2570a0d9",
+    "names": []
+  },
+  {
+    "sel": "0xf92ee8a9",
+    "names": [
+      "InvalidInitialization()"
+    ]
+  },
+  {
+    "sel": "0x118cdaa7",
+    "names": [
+      "OwnableUnauthorizedAccount(address)"
+    ]
+  },
+  {
+    "sel": "0xc3c5a547",
+    "names": [
+      "isRegistered(address)"
+    ]
+  },
+  {
+    "sel": "0x703e46dd",
+    "names": []
+  },
+  {
+    "sel": "0x4c9c8ce3",
+    "names": [
+      "ERC1967InvalidImplementation(address)"
+    ]
+  },
+  {
+    "sel": "0x2a875269",
+    "names": []
+  },
+  {
+    "sel": "0x1afcd79f",
+    "names": []
+  },
+  {
+    "sel": "0x1e4fbdf7",
+    "names": [
+      "OwnableInvalidOwner(address)"
+    ]
+  },
+  {
+    "sel": "0x9996b315",
+    "names": [
+      "AddressEmptyCode(address)"
+    ]
+  },
+  {
+    "sel": "0xd6bda275",
+    "names": [
+      "FailedCall()"
+    ]
+  },
+  {
+    "sel": "0xb398979f",
+    "names": [
+      "ERC1967NonPayable()"
+    ]
+  },
+  {
+    "sel": "0x4e487b71",
+    "names": [
+      "Panic(uint256)"
+    ]
+  }
+]

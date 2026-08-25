@@ -1,0 +1,27 @@
+{
+  "testnet": {
+    "market": "0x000000000000000000000000000000000000000000000000000000000000794d",
+    "pool": "0x408c5f8b1762a53a94a0020a4d8e4cbd32139fba",
+    "quoteDecimals": 6,
+    "onchainStatus": 1,
+    "params": {
+      "tickSize": "1000",
+      "minQuantity": "1000",
+      "lotSize": "1000"
+    }
+  },
+  "mainnet": {
+    "ETH": {
+      "pool": "0x39b910486dbc82510d0990caa8b4af05da864bb4",
+      "tickSize": "1000000000000000",
+      "minQuantity": "1000000000000000",
+      "lotSize": "1000000000000000"
+    },
+    "BTC": {
+      "pool": "0xd22908ed947495d4d3dac8c75e75a5cf495ff736",
+      "tickSize": "1000000000000000",
+      "minQuantity": "1000000000000000",
+      "lotSize": "1000000000000000"
+    }
+  }
+}

@@ -1,0 +1,132 @@
+{
+  "owner": "0x291411D322ECBd4E9b86F05077c0931586142990",
+  "chain": "somnia-shannon-testnet",
+  "chainId": 50312,
+  "tx": {
+    "approve": {
+      "hash": "0x8c8d26499e35f7ecb2e6a8be48d5af9be726df7e68643e12d97f404b6cc2895d",
+      "status": "success",
+      "block": 470422986,
+      "gasUsed": "259745",
+      "logs": 1
+    },
+    "placeBinaryOrder_BUY_YES": {
+      "hash": "0x89f21fa986fc92ee5421ad8ecb1857ed7f8c65f86adf22e73f520759945a41f8",
+      "status": "success",
+      "block": 470423013,
+      "gasUsed": "828612",
+      "logs": 8
+    },
+    "placeBinaryOrder_BUY_NO": {
+      "hash": "0x206c28cf1cb0ace32cce839ffbf0670b5db942a60c8a2dd89d79aefc2c6050b5",
+      "status": "success",
+      "block": 470423028,
+      "gasUsed": "281962",
+      "logs": 4
+    },
+    "redeem_YES": {
+      "hash": "0x643c7a229991f745e02b59fcee6904dcedfe192cd1683315d969a66d5cfc352b",
+      "status": "success",
+      "block": 470423221,
+      "gasUsed": "441677",
+      "logs": 4
+    }
+  },
+  "steps": {
+    "step0_funding": {
+      "collateralBalance": "9999686000",
+      "decimals": 6
+    },
+    "step1_statusGate": {
+      "marketId": "0x0000000000000000000000000000000000000000000000000000000000008bad",
+      "pool": "0x141f15ddbb6edc9c2d8ce5d8b39108469ac5edc2",
+      "asset": "BTC",
+      "intervalSec": 60,
+      "expiry": "1787615220",
+      "secsToExpiry": 26,
+      "onchainStatus": 1,
+      "gate": "OPEN",
+      "operatorId": 4,
+      "venueId": "0x1a1e6821cde7d0159c0d293177871e09677b4e42307c7db3ba94f8648a5a050f",
+      "yesTokenId": "542472609593508133165569488742975430257427789528261660143331385196800",
+      "noTokenId": "542472609593508133165569488742975430257427789528261660143331385196801"
+    },
+    "step2_tickSnap": {
+      "tickSize": "1000",
+      "lotSize": "1000",
+      "minQuantity": "1000",
+      "decimals": 6,
+      "bestAskYes": "277000",
+      "snappedBidYes": "777000",
+      "onTickYes": true,
+      "bestAskNo": "750000",
+      "snappedBidNo": "999000",
+      "onTickNo": true,
+      "naive18DecControl": "777000000000000024",
+      "naive18OnTick": false
+    },
+    "step3_allowance": {
+      "spender": "0x141f15ddbb6edc9c2d8ce5d8b39108469ac5edc2",
+      "approved": "max"
+    },
+    "step3_place": {
+      "selector": "0x718c2d4d",
+      "calldataBytes": 292,
+      "qty": "1000000",
+      "expireNs": "1787615220000000000",
+      "yesBefore": "0",
+      "yesAfter": "1000000",
+      "yesDelta": "1000000",
+      "noBefore": "0",
+      "noAfter": "0",
+      "noDelta": "0",
+      "collateralBefore": "9999686000",
+      "collateralAfter": "9999441000",
+      "collateralDelta": "-245000",
+      "fillConfirmed": true
+    },
+    "step4_settle": {
+      "expiry": 1787615220,
+      "polls": 1,
+      "status": 4,
+      "finalized": true,
+      "isResolved": true,
+      "winningOutcome": 1
+    },
+    "step5_discovery": {
+      "inDefaultLiveListing": false,
+      "finalizedListCount": 100,
+      "ourMarketFoundInFinalized": true,
+      "winningOutcome": 1,
+      "payoutNumerators": [
+        "0",
+        "10000000"
+      ],
+      "payoutDenominator": "10000000",
+      "yesBalance": "1000000",
+      "noBalance": "0"
+    },
+    "step5b_erc6909Operator": {
+      "token": "0xB52c5934113Af5c0Bb20eb3C72290C8215f755b9",
+      "module": "0x3ecC694Cef705358864a646142ac17A90E29e388",
+      "isOperatorBefore": true,
+      "isOperatorReadError": null,
+      "simulation": "NO REVERT",
+      "case": "ALREADY_GRANTED — redundant broadcast SKIPPED"
+    },
+    "step6_redeem_YES": {
+      "outcomeIdx": 0,
+      "amount": "1000000",
+      "winner": false,
+      "collateralBefore": "9999441000",
+      "collateralAfter": "9999441000",
+      "payout": "0",
+      "tokenBalanceAfter": "0"
+    },
+    "step6_total": {
+      "collateralBefore": "9999441000",
+      "collateralAfter": "9999441000",
+      "totalPayout": "0"
+    }
+  }
+}

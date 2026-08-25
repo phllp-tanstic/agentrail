@@ -1,0 +1,82 @@
+{
+  "testnet": {
+    "label": "TESTNET (Shannon 50312, 6 dec)",
+    "pool": "0xb0b41c612c6972b0407fdbbe5eeb82494fd13e36",
+    "registry": "0x15C7e8CE38F021c5b45d098AaD788f63090bF20A",
+    "operator": "0x7DC341d40513125E0711914eE7402b15bFF59d90",
+    "owners": {
+      "EOA owner": {
+        "owner": "0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A",
+        "name": "EOA owner",
+        "grantSlots": 7,
+        "grantSlotsSetToOne": 3,
+        "withGrant": {
+          "raw": "0x3fb0ba2e",
+          "decoded": "0x3fb0ba2e = OnlyApprovedContracts()"
+        },
+        "withoutGrant": {
+          "raw": "0x3fb0ba2e",
+          "decoded": "0x3fb0ba2e = OnlyApprovedContracts()"
+        },
+        "gateOpened": false
+      },
+      "Safe owner (real Safe 1.3.0 code)": {
+        "owner": "0xdddd000000000000000000000000000000000004",
+        "name": "Safe owner (real Safe 1.3.0 code)",
+        "grantSlots": 7,
+        "grantSlotsSetToOne": 3,
+        "withGrant": {
+          "raw": "0x3fb0ba2e",
+          "decoded": "0x3fb0ba2e = OnlyApprovedContracts()"
+        },
+        "withoutGrant": {
+          "raw": "0x3fb0ba2e",
+          "decoded": "0x3fb0ba2e = OnlyApprovedContracts()"
+        },
+        "gateOpened": false
+      }
+    },
+    "identicalBeyondGate": true,
+    "verdict": "IDENTICAL beyond the permission gate: EOA and Safe owners both -> 0x3fb0ba2e = OnlyApprovedContracts()"
+  },
+  "mainnetETH": {
+    "label": "MAINNET (5031, 18 dec) ETH pool",
+    "pool": "0x39b910486dbc82510d0990caa8b4af05da864bb4",
+    "registry": "0xE7a190736B6024a4DbafadC04E283075877005ce",
+    "operator": "0x7DC341d40513125E0711914eE7402b15bFF59d90",
+    "owners": {
+      "EOA owner": {
+        "owner": "0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A",
+        "name": "EOA owner",
+        "grantSlots": 7,
+        "grantSlotsSetToOne": 3,
+        "withGrant": {
+          "raw": "0x3fb0ba2e",
+          "decoded": "0x3fb0ba2e = OnlyApprovedContracts()"
+        },
+        "withoutGrant": {
+          "raw": "0x3fb0ba2e",
+          "decoded": "0x3fb0ba2e = OnlyApprovedContracts()"
+        },
+        "gateOpened": false
+      },
+      "Safe owner (real Safe 1.3.0 code)": {
+        "owner": "0xdddd000000000000000000000000000000000004",
+        "name": "Safe owner (real Safe 1.3.0 code)",
+        "grantSlots": 7,
+        "grantSlotsSetToOne": 3,
+        "withGrant": {
+          "raw": "0x3fb0ba2e",
+          "decoded": "0x3fb0ba2e = OnlyApprovedContracts()"
+        },
+        "withoutGrant": {
+          "raw": "0x3fb0ba2e",
+          "decoded": "0x3fb0ba2e = OnlyApprovedContracts()"
+        },
+        "gateOpened": false
+      }
+    },
+    "identicalBeyondGate": true,
+    "verdict": "IDENTICAL beyond the permission gate: EOA and Safe owners both -> 0x3fb0ba2e = OnlyApprovedContracts()"
+  }
+}

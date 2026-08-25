@@ -1,0 +1,351 @@
+{
+  "probedAt": "2026-08-25T00:03:11.928Z",
+  "markets": [
+    {
+      "marketId": "0x0000000000000000000000000000000000000000000000000000000000008bdd",
+      "asset": "BTC",
+      "pool": "0xcd3db5f79dc325a5d771668d8802dceac44e6c43",
+      "intervalSec": 60,
+      "secsToExpiry": 47,
+      "decimals": 6,
+      "bookKeys": [
+        "yesBids",
+        "yesAsks",
+        "noBids",
+        "noAsks"
+      ],
+      "sides": {
+        "yesBids": [],
+        "yesAsks": [],
+        "noBids": [],
+        "noAsks": []
+      },
+      "totals": {
+        "yesAsks": "0",
+        "yesBids": "0",
+        "noAsks": "0",
+        "noBids": "0"
+      },
+      "noSideHasDepth": {
+        "asks": false,
+        "bids": false
+      },
+      "mirrorTest": {
+        "levels": 0,
+        "exactMirrors": 0,
+        "priceMatches": 0,
+        "detail": []
+      }
+    },
+    {
+      "marketId": "0x0000000000000000000000000000000000000000000000000000000000008bde",
+      "asset": "ETH",
+      "pool": "0x1569440e5b2dce761ccb66907c787594956b0a7f",
+      "intervalSec": 60,
+      "secsToExpiry": 47,
+      "decimals": 6,
+      "bookKeys": [
+        "yesBids",
+        "yesAsks",
+        "noBids",
+        "noAsks"
+      ],
+      "sides": {
+        "yesBids": [],
+        "yesAsks": [],
+        "noBids": [],
+        "noAsks": []
+      },
+      "totals": {
+        "yesAsks": "0",
+        "yesBids": "0",
+        "noAsks": "0",
+        "noBids": "0"
+      },
+      "noSideHasDepth": {
+        "asks": false,
+        "bids": false
+      },
+      "mirrorTest": {
+        "levels": 0,
+        "exactMirrors": 0,
+        "priceMatches": 0,
+        "detail": []
+      }
+    },
+    {
+      "marketId": "0x0000000000000000000000000000000000000000000000000000000000008bcd",
+      "asset": "BTC",
+      "pool": "0x6a2ce98f392eda26c68e9762fc3632dd32d034b7",
+      "intervalSec": 300,
+      "secsToExpiry": 107,
+      "decimals": 6,
+      "bookKeys": [
+        "yesBids",
+        "yesAsks",
+        "noBids",
+        "noAsks"
+      ],
+      "sides": {
+        "yesBids": [
+          {
+            "price": "76000",
+            "qty": "200000000",
+            "p": "0.076",
+            "units": "200"
+          },
+          {
+            "price": "69000",
+            "qty": "330000000",
+            "p": "0.069",
+            "units": "330"
+          },
+          {
+            "price": "61000",
+            "qty": "460000000",
+            "p": "0.061",
+            "units": "460"
+          }
+        ],
+        "yesAsks": [
+          {
+            "price": "95000",
+            "qty": "200000000",
+            "p": "0.095",
+            "units": "200"
+          },
+          {
+            "price": "107000",
+            "qty": "330000000",
+            "p": "0.107",
+            "units": "330"
+          },
+          {
+            "price": "114000",
+            "qty": "460000000",
+            "p": "0.114",
+            "units": "460"
+          }
+        ],
+        "noBids": [
+          {
+            "price": "905000",
+            "qty": "200000000",
+            "p": "0.905",
+            "units": "200"
+          },
+          {
+            "price": "893000",
+            "qty": "330000000",
+            "p": "0.893",
+            "units": "330"
+          },
+          {
+            "price": "886000",
+            "qty": "460000000",
+            "p": "0.886",
+            "units": "460"
+          }
+        ],
+        "noAsks": [
+          {
+            "price": "924000",
+            "qty": "200000000",
+            "p": "0.924",
+            "units": "200"
+          },
+          {
+            "price": "931000",
+            "qty": "330000000",
+            "p": "0.931",
+            "units": "330"
+          },
+          {
+            "price": "939000",
+            "qty": "460000000",
+            "p": "0.939",
+            "units": "460"
+          }
+        ]
+      },
+      "totals": {
+        "yesAsks": "990000000",
+        "yesBids": "990000000",
+        "noAsks": "990000000",
+        "noBids": "990000000"
+      },
+      "noSideHasDepth": {
+        "asks": true,
+        "bids": true
+      },
+      "mirrorTest": {
+        "levels": 3,
+        "exactMirrors": 3,
+        "priceMatches": 3,
+        "detail": [
+          {
+            "noAskPrice": "924000",
+            "noAskQty": "200000000",
+            "impliedYesBidPrice": "76000",
+            "matchedYesBid": "76000",
+            "matchedYesBidQty": "200000000",
+            "qtyIdentical": true
+          },
+          {
+            "noAskPrice": "931000",
+            "noAskQty": "330000000",
+            "impliedYesBidPrice": "69000",
+            "matchedYesBid": "69000",
+            "matchedYesBidQty": "330000000",
+            "qtyIdentical": true
+          },
+          {
+            "noAskPrice": "939000",
+            "noAskQty": "460000000",
+            "impliedYesBidPrice": "61000",
+            "matchedYesBid": "61000",
+            "matchedYesBidQty": "460000000",
+            "qtyIdentical": true
+          }
+        ]
+      }
+    },
+    {
+      "marketId": "0x0000000000000000000000000000000000000000000000000000000000008bce",
+      "asset": "ETH",
+      "pool": "0x37ea2f364866c6640836269dbbe720ef18a160bb",
+      "intervalSec": 300,
+      "secsToExpiry": 107,
+      "decimals": 6,
+      "bookKeys": [
+        "yesBids",
+        "yesAsks",
+        "noBids",
+        "noAsks"
+      ],
+      "sides": {
+        "yesBids": [
+          {
+            "price": "79000",
+            "qty": "200000000",
+            "p": "0.079",
+            "units": "200"
+          },
+          {
+            "price": "71000",
+            "qty": "330000000",
+            "p": "0.071",
+            "units": "330"
+          },
+          {
+            "price": "63000",
+            "qty": "460000000",
+            "p": "0.063",
+            "units": "460"
+          }
+        ],
+        "yesAsks": [
+          {
+            "price": "102000",
+            "qty": "200000000",
+            "p": "0.102",
+            "units": "200"
+          },
+          {
+            "price": "110000",
+            "qty": "330000000",
+            "p": "0.11",
+            "units": "330"
+          },
+          {
+            "price": "118000",
+            "qty": "460000000",
+            "p": "0.118",
+            "units": "460"
+          }
+        ],
+        "noBids": [
+          {
+            "price": "898000",
+            "qty": "200000000",
+            "p": "0.898",
+            "units": "200"
+          },
+          {
+            "price": "890000",
+            "qty": "330000000",
+            "p": "0.89",
+            "units": "330"
+          },
+          {
+            "price": "882000",
+            "qty": "460000000",
+            "p": "0.882",
+            "units": "460"
+          }
+        ],
+        "noAsks": [
+          {
+            "price": "921000",
+            "qty": "200000000",
+            "p": "0.921",
+            "units": "200"
+          },
+          {
+            "price": "929000",
+            "qty": "330000000",
+            "p": "0.929",
+            "units": "330"
+          },
+          {
+            "price": "937000",
+            "qty": "460000000",
+            "p": "0.937",
+            "units": "460"
+          }
+        ]
+      },
+      "totals": {
+        "yesAsks": "990000000",
+        "yesBids": "990000000",
+        "noAsks": "990000000",
+        "noBids": "990000000"
+      },
+      "noSideHasDepth": {
+        "asks": true,
+        "bids": true
+      },
+      "mirrorTest": {
+        "levels": 3,
+        "exactMirrors": 3,
+        "priceMatches": 3,
+        "detail": [
+          {
+            "noAskPrice": "921000",
+            "noAskQty": "200000000",
+            "impliedYesBidPrice": "79000",
+            "matchedYesBid": "79000",
+            "matchedYesBidQty": "200000000",
+            "qtyIdentical": true
+          },
+          {
+            "noAskPrice": "929000",
+            "noAskQty": "330000000",
+            "impliedYesBidPrice": "71000",
+            "matchedYesBid": "71000",
+            "matchedYesBidQty": "330000000",
+            "qtyIdentical": true
+          },
+          {
+            "noAskPrice": "937000",
+            "noAskQty": "460000000",
+            "impliedYesBidPrice": "63000",
+            "matchedYesBid": "63000",
+            "matchedYesBidQty": "460000000",
+            "qtyIdentical": true
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,331 @@
+{
+  "selectorDB": {
+    "note": "openchain+4byte both return null for 0x2f2461cd AND 0x5d97c566 (custom, unindexed)"
+  },
+  "moduleCode": {
+    "mainnet": {
+      "codeLen": 130,
+      "eip1967Impl": "0xdf87ac5c4760e2f1dd78e054ce0629a26a4ca5ca"
+    },
+    "testnet": {
+      "codeLen": 130,
+      "eip1967Impl": "0xdf87ac5c4760e2f1dd78e054ce0629a26a4ca5ca"
+    }
+  },
+  "moduleVerify": [
+    {
+      "net": "mainnet",
+      "label": "module",
+      "addr": "0x3ecc694cef705358864a646142ac17a90e29e388",
+      "status": 200,
+      "isVerified": true,
+      "name": "ERC1967Proxy",
+      "proxyType": "eip1967",
+      "implementations": [
+        {
+          "name": null
+        }
+      ],
+      "fnCount": 0,
+      "orderRelatedFns": []
+    },
+    {
+      "net": "mainnet",
+      "label": "module-impl",
+      "addr": "0xdf87ac5c4760e2f1dd78e054ce0629a26a4ca5ca",
+      "status": 200,
+      "isVerified": false,
+      "name": null,
+      "proxyType": null,
+      "implementations": [],
+      "fnCount": 0,
+      "orderRelatedFns": []
+    },
+    {
+      "net": "testnet",
+      "label": "module",
+      "addr": "0x3ecc694cef705358864a646142ac17a90e29e388",
+      "status": 200,
+      "isVerified": false,
+      "name": "ERC1967Proxy",
+      "proxyType": "eip1967",
+      "implementations": [
+        {
+          "name": null
+        }
+      ],
+      "fnCount": 0,
+      "orderRelatedFns": []
+    },
+    {
+      "net": "testnet",
+      "label": "module-impl",
+      "addr": "0xdf87ac5c4760e2f1dd78e054ce0629a26a4ca5ca",
+      "status": 200,
+      "isVerified": false,
+      "name": null,
+      "proxyType": null,
+      "implementations": [],
+      "fnCount": 0,
+      "orderRelatedFns": []
+    }
+  ],
+  "moduleInbound": {
+    "mainnet": {
+      "inspected": 29,
+      "pages": 1,
+      "successful": 29,
+      "distinctSenders": 3,
+      "topSelectors": [
+        [
+          "0x5b1ffcf2",
+          21
+        ],
+        [
+          "0x4f1ef286",
+          2
+        ],
+        [
+          "0xf2fde38b",
+          1
+        ],
+        [
+          "0x8f4e6f37",
+          1
+        ],
+        [
+          "0xf5b7ba39",
+          1
+        ],
+        [
+          "0x3d312f6d",
+          1
+        ],
+        [
+          "0x147607c3",
+          1
+        ],
+        [
+          "0x8e3aeebc",
+          1
+        ]
+      ],
+      "methodNames": {
+        "0x5b1ffcf2": 21,
+        "transferOwnership": 1,
+        "upgradeToAndCall": 2,
+        "setSettlement": 1,
+        "setOutcomeToken": 1,
+        "setAdapterApproved": 1,
+        "0x147607c3": 1,
+        "0x8e3aeebc": 1
+      },
+      "sampleSenders": [
+        "0x8c4468fb03a8e02e9cc67532fd35250ab3843333",
+        "0x1d2b9b3dbb7a0da9e99b6191dc372cee64d4dfab",
+        "0xe7eb5d2b5b188777df902e89c54570e7ef4f59ce"
+      ],
+      "sampleInputBySelector": {
+        "0x5b1ffcf2": {
+          "hash": "0x03112392aceaf3aa6bfaceb4c92adde076f2cb10e0576a178f03c15d5ff58e73",
+          "from": "0x8C4468FB03a8e02e9Cc67532fd35250ab3843333",
+          "method": "0x5b1ffcf2",
+          "status": "ok",
+          "input": "0x5b1ffcf200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        },
+        "0xf2fde38b": {
+          "hash": "0xa811fe63532d9ef99601dc86a66f3b7085dd3dcce5ced3f683a25abd59331c41",
+          "from": "0xE7eB5D2b5b188777df902e89c54570E7Ef4F59CE",
+          "method": "transferOwnership",
+          "status": "ok",
+          "input": "0xf2fde38b000000000000000000000000a04d22a7f8ac606d57f810775dfef2b06ac0055c"
+        },
+        "0x4f1ef286": {
+          "hash": "0x583ebae8a849039b93f1a2e4bb87af6cd95b6193155476029c0ff2c78e71af46",
+          "from": "0xE7eB5D2b5b188777df902e89c54570E7Ef4F59CE",
+          "method": "upgradeToAndCall",
+          "status": "ok",
+          "input": "0x4f1ef286000000000000000000000000e82e6ac14fdc7de4ad793ca63355c7890cdeae1a0000000000000000000000000000000000000000000000000000000000000040"
+        },
+        "0x8f4e6f37": {
+          "hash": "0x6ff785cc326d14152e6b04465194d3f885ca4b6e54ed692156a98357b3d24dec",
+          "from": "0xE7eB5D2b5b188777df902e89c54570E7Ef4F59CE",
+          "method": "setSettlement",
+          "status": "ok",
+          "input": "0x8f4e6f37000000000000000000000000bf4a49e0dfd092e5fbe8e5761064c49533e6ed23"
+        },
+        "0xf5b7ba39": {
+          "hash": "0x7e4f995cb6ce03cb72d0e59eb28c881868df930341712b4b9ac3a385e26e153a",
+          "from": "0xE7eB5D2b5b188777df902e89c54570E7Ef4F59CE",
+          "method": "setOutcomeToken",
+          "status": "ok",
+          "input": "0xf5b7ba39000000000000000000000000b52c5934113af5c0bb20eb3c72290c8215f755b9"
+        },
+        "0x3d312f6d": {
+          "hash": "0x7f1bd76921cd8c07706ee8c16a0acf789e96ee6614612d82691ba4b64ef37019",
+          "from": "0xE7eB5D2b5b188777df902e89c54570E7Ef4F59CE",
+          "method": "setAdapterApproved",
+          "status": "ok",
+          "input": "0x3d312f6d000000000000000000000000e40db387cc98601dd11bd634ff2f3ad5686de32b0000000000000000000000000000000000000000000000000000000000000001"
+        },
+        "0x147607c3": {
+          "hash": "0x123d46666053fa23b77fbeb60e1f1e5beb437de3d83071589cc84163961ad87b",
+          "from": "0xE7eB5D2b5b188777df902e89c54570E7Ef4F59CE",
+          "method": "0x147607c3",
+          "status": "ok",
+          "input": "0x147607c300000000000000000000000082a1fcdaa2dac2fc7d5f9909d43e68021ee966fd"
+        },
+        "0x8e3aeebc": {
+          "hash": "0xa6e22eee86c0d4e273f16b96a8ad9a443e91313594939cce7a6a71bc29321164",
+          "from": "0xE7eB5D2b5b188777df902e89c54570E7Ef4F59CE",
+          "method": "0x8e3aeebc",
+          "status": "ok",
+          "input": "0x8e3aeebc000000000000000000000000b2be8ee02f96379db75f01802384593eba9bff04"
+        }
+      }
+    },
+    "testnet": {
+      "inspected": 300,
+      "pages": 6,
+      "successful": 217,
+      "distinctSenders": 13,
+      "topSelectors": [
+        [
+          "0x5b1ffcf2",
+          284
+        ],
+        [
+          "0x88cb9474",
+          10
+        ],
+        [
+          "0x4efe024a",
+          5
+        ],
+        [
+          "0x84f093c0",
+          1
+        ]
+      ],
+      "methodNames": {
+        "0x5b1ffcf2": 284,
+        "0x88cb9474": 10,
+        "0x84f093c0": 1,
+        "0x4efe024a": 5
+      },
+      "sampleSenders": [
+        "0x93e300607c363e7d7a47e50f5c9fdf1723e859cf",
+        "0xe4ea8b4fc1bbff290f3dbd29ce8471348de860db",
+        "0x84648b6b2ffaa904903de917e5659ff0f4d14490",
+        "0x95a6b4e50a78bc23099628e25ecaf163c38e1273",
+        "0x23e10d27b539d3bb3833b6ad27507d1f24a4ec80",
+        "0xd7fd52209711c94a3fcc4f3aeb3668d2df829254",
+        "0x24086a82520a1391758dac82c5d482ee6b3141b3",
+        "0xe7eb5d2b5b188777df902e89c54570e7ef4f59ce",
+        "0x996aa4f40ea5bc951ff9dd4f9ff1c7ce4c1a9420",
+        "0xd1894d473394c8375744cc37b7e1612ebe20d32d",
+        "0x1d2b9b3dbb7a0da9e99b6191dc372cee64d4dfab",
+        "0xd44884692512933278a9b97748c810b6388866fa"
+      ],
+      "sampleInputBySelector": {
+        "0x5b1ffcf2": {
+          "hash": "0xb46594826c59a62973e04f724ebb524c5f21f8236bdf04936a02bf5acde0d77b",
+          "from": "0x93e300607c363E7D7a47e50f5c9fDf1723e859Cf",
+          "method": "0x5b1ffcf2",
+          "status": "error",
+          "input": "0x5b1ffcf200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        },
+        "0x88cb9474": {
+          "hash": "0xd231ed843aaeebadddea0af91ed6c8e16d479e600a7ff676ee78ff0d6ef6fe38",
+          "from": "0x95A6B4e50a78bC23099628E25ECAf163c38E1273",
+          "method": "0x88cb9474",
+          "status": "ok",
+          "input": "0x88cb947400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        },
+        "0x84f093c0": {
+          "hash": "0xf3fb1d971346c5db9f461fe13b0fcc6b77af6051f0026fe94b9ab138bb75e851",
+          "from": "0x24086A82520a1391758DaC82C5D482Ee6b3141B3",
+          "method": "0x84f093c0",
+          "status": "ok",
+          "input": "0x84f093c0000000000000000000000000e4ea8b4fc1bbff290f3dbd29ce8471348de860db00000000000000000000000000000000000000000000000000065969aa037782"
+        },
+        "0x4efe024a": {
+          "hash": "0x1b3066eaca6c808e07d293baddc08b4346f04a8564faf5e6a7c9a27cdf2fa1dc",
+          "from": "0xE7eB5D2b5b188777df902e89c54570E7Ef4F59CE",
+          "method": "0x4efe024a",
+          "status": "ok",
+          "input": "0x4efe024a0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000a"
+        }
+      }
+    }
+  },
+  "poolSenders": {
+    "BTC": {
+      "pool": "0xd22908ed947495d4d3dac8c75e75a5cf495ff736",
+      "inspected": 169,
+      "tx_2f": 169,
+      "distinctSenders": 1,
+      "senders": [
+        {
+          "addr": "0xff825f7b605f644a76138659c8bdc1d178e739db",
+          "name": ""
+        }
+      ],
+      "decodedMethod": "0x2f2461cd",
+      "sampleInput": "0x2f2461cd00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000005"
+    },
+    "ETH": {
+      "pool": "0x39b910486dbc82510d0990caa8b4af05da864bb4",
+      "inspected": 176,
+      "tx_2f": 176,
+      "distinctSenders": 1,
+      "senders": [
+        {
+          "addr": "0xff825f7b605f644a76138659c8bdc1d178e739db",
+          "name": ""
+        }
+      ],
+      "decodedMethod": "0x2f2461cd",
+      "sampleInput": "0x2f2461cd00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000003"
+    }
+  },
+  "poolInternalCallers": {
+    "BTC": {
+      "pool": "0xd22908ed947495d4d3dac8c75e75a5cf495ff736",
+      "inspected": 150,
+      "moduleIsInternalCaller": false,
+      "callers": [
+        {
+          "addr": "0x42040dc49c2df9fa2e85fb97a342cb4b0de16791",
+          "name": "",
+          "count": 150
+        }
+      ]
+    },
+    "ETH": {
+      "pool": "0x39b910486dbc82510d0990caa8b4af05da864bb4",
+      "inspected": 150,
+      "moduleIsInternalCaller": false,
+      "callers": [
+        {
+          "addr": "0x554080c97adb99ddafeee49e7357d1dc07c8518f",
+          "name": "",
+          "count": 150
+        }
+      ]
+    }
+  },
+  "crossref": {
+    "moduleAddr": "0x3ecc694cef705358864a646142ac17a90e29e388",
+    "moduleInPoolTopLevelSenders": false,
+    "moduleIsInternalCallerOfPool": false,
+    "pool2fSenders": [
+      {
+        "addr": "0xff825f7b605f644a76138659c8bdc1d178e739db",
+        "name": ""
+      }
+    ],
+    "moduleInboundSenderCount": 14,
+    "senderOverlap_pool2f_vs_moduleInbound": []
+  }
+}

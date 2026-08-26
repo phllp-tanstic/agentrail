@@ -28,7 +28,8 @@ import {
 import { privateKeyToAccount } from 'viem/accounts';
 import { redeemGuard } from './redeem-guard.mjs';
 import { snapPriceToTick, isOnTick, exactToRaw } from './tick-snap.mjs';
-import { checkPreOrder, recordSpend, recordPayout, riskSnapshot, RISK_CONFIG } from './risk.mjs';
+import { checkPreOrder, commitReservation, releaseReservation, recordSpend,
+  recordPayout, riskSnapshot, RISK_CONFIG } from './risk.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -252,9 +253,44 @@ export async function place_order(input = {}) {
 
   // ------------------------------------------------------------------ attempts
   // Exactly one automatic retry, and only for a revert we classify as retryable.
+  //
+  // RESERVATION LIFECYCLE: the risk check on attempt 1 RESERVES the worst-case
+  // spend. Every exit from here on must resolve that reservation exactly once, or
+  // it permanently eats capacity with no real order behind it. The try/finally
+  // below is the backstop: any path that leaves without committing — a refusal, a
+  // thrown error, an interruption mid-flow — releases.
   const MAX_ATTEMPTS = 2;
   let riskApproved = null;
+  let reservationId = null;
+  let reservationResolved = false;
 
+  const commit = (actualSpentUsd, note) => {
+    if (!reservationId || reservationResolved) return;
+    commitReservation({ reservationId, marketId: market_id, actualSpentUsd });
+    reservationResolved = true;
+    R.reservation = { reservationId, resolution: 'COMMITTED',
+      actualSpentUsd: Number(Number(actualSpentUsd).toFixed(6)), note };
+  };
+
+  // Release EXPLICITLY on any refusal that happens after the reservation was
+  // taken, rather than leaving it to the finally-block backstop.
+  //
+  // This is a reporting correctness issue, not a state one — the backstop does
+  // free the capacity either way. But `return { ...R, riskStatus: riskSnapshot() }`
+  // evaluates its spread and its snapshot BEFORE finally runs, so a payload built
+  // on a still-open reservation reports `reservation: OPEN` and a riskStatus with
+  // capacity consumed, while the state it describes has already released it. The
+  // caller would see phantom exposure that no order explains. Releasing here, then
+  // building the return value, makes the payload and the state agree.
+  const release = (why) => {
+    if (!reservationId || reservationResolved) return;
+    releaseReservation({ reservationId, why });
+    reservationResolved = true;
+    R.reservation = { reservationId, resolution: 'RELEASED', why,
+      note: 'Refused after reserving. The reservation was released, so this order consumes no risk capacity.' };
+  };
+
+  try {
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     const AT = { attempt };
 
@@ -264,6 +300,7 @@ export async function place_order(input = {}) {
     AT.statusGate = { status: onchain.status, open: gateOpen };
     if (!gateOpen) {
       R.attempts.push(AT);
+      release('status gate closed on a retry attempt — refusing to submit into a closed window');
       return { ok: false, refused: true, ...R, reason: 'status_gate_closed',
         detail: `status gate CLOSED (status=${onchain.status}) — refusing to submit into a window already closed on-chain.` };
     }
@@ -273,6 +310,7 @@ export async function place_order(input = {}) {
     const asksRef = obRef?.yesAsks ?? [];
     if (!asksRef.length) {
       R.attempts.push(AT);
+      release('no resting liquidity on a retry attempt — the book emptied between attempts');
       return { ok: false, ...R, reason: 'no_resting_liquidity',
         detail: 'no resting yesAsks on this market — nothing to cross. Pick a market from list_markets with non-zero yesAskDepthUnits.' };
     }
@@ -304,6 +342,7 @@ export async function place_order(input = {}) {
       QTY = (BigInt(Math.round(Number(stakeUnits) * 1000)) * unit) / 1000n;
       if (QTY <= 0n) {
         R.attempts.push(AT);
+        release('zero quantity on a retry attempt');
         return { ok: false, refused: true, ...R, reason: 'zero_quantity',
           detail: `stake_units=${stakeUnits} resolves to zero quantity.` };
       }
@@ -331,8 +370,10 @@ export async function place_order(input = {}) {
       note: 'worstCaseAtOurLimitUsd assumes we pay our own limit price, which is what Phase B observed when an order rested and was then taken. It is the figure the risk check uses.' };
 
     // --- RISK GUARDRAILS — server-side, evaluated BEFORE any broadcast.
-    // Only on attempt 1: a retry re-places the same intent and must not be
-    // double-counted against the per-window cap.
+    // On approval this RESERVES the worst-case spend in the same synchronous step,
+    // so a concurrent caller sees this order's exposure immediately rather than a
+    // stale total. Only on attempt 1: a retry re-places the same intent and reuses
+    // the existing reservation rather than taking a second one.
     if (attempt === 1) {
       const rk = checkPreOrder({ marketId: market_id, estimatedSpendUsd: worstCaseSpendUsd });
       AT.riskCheck = rk;
@@ -342,8 +383,11 @@ export async function place_order(input = {}) {
           riskStatus: riskSnapshot() };
       }
       riskApproved = rk;
+      reservationId = rk.reservationId;
+      R.reservation = { reservationId, resolution: 'OPEN',
+        reservedUsd: rk.reservedNowUsd };
     } else {
-      AT.riskCheck = { skipped: 'already approved on attempt 1 — a retry is the same intent, not new exposure' };
+      AT.riskCheck = { skipped: `already approved and reserved on attempt 1 (${reservationId}) — a retry is the same intent, not new exposure` };
     }
 
     // --- per-pool ERC20 allowance: recurs per window (proven runs 1 & 2)
@@ -364,7 +408,9 @@ export async function place_order(input = {}) {
       } catch (e) {
         AT.allowanceError = e.shortMessage ?? e.message;
         R.attempts.push(AT);
-        return { ok: false, ...R, reason: 'allowance_failed', detail: AT.allowanceError };
+        release('allowance approval failed — nothing was placed');
+        return { ok: false, ...R, reason: 'allowance_failed', detail: AT.allowanceError,
+          riskStatus: riskSnapshot() };
       }
       sim = await rawCall({ from: owner.address, to: M.poolAddress, data: dYes });
     } else {
@@ -389,6 +435,7 @@ export async function place_order(input = {}) {
 
     if (sizingMode === 'DOLLAR' && slippagePct > maxSlippagePct) {
       R.attempts.push(AT);
+      release(`slippage guard refused the order (${slippagePct.toFixed(4)}% > ${maxSlippagePct}%) — nothing was broadcast`);
       return { ok: false, refused: true, ...R, reason: 'slippage_exceeded',
         detail: `best ask moved ${slippagePct.toFixed(4)}% (${referencePrice} -> ${placementPrice}) between sizing and placement, exceeding maxSlippagePct=${maxSlippagePct}. The quantity sized for $${targetDollarAmount} would now spend about $${toUsd((placementPrice * QTY) / ONE).toFixed(6)}. NOT broadcast.`,
         riskStatus: riskSnapshot() };
@@ -397,8 +444,10 @@ export async function place_order(input = {}) {
     AT.simulation = sim.ok ? 'NO REVERT' : decodeRevert(sim.data);
     if (!sim.ok) {
       R.attempts.push(AT);
+      release('order simulation reverted — nothing was broadcast');
       return { ok: false, ...R, reason: 'simulation_reverted',
-        detail: `order simulation reverted: ${AT.simulation} — NOT broadcast.` };
+        detail: `order simulation reverted: ${AT.simulation} — NOT broadcast.`,
+        riskStatus: riskSnapshot() };
     }
     AT.calldata = { selector: dYes.slice(0, 10), bytes: (dYes.length - 2) / 2, path: 'self placeBinaryOrder' };
 
@@ -432,8 +481,15 @@ export async function place_order(input = {}) {
       if (retryable && attempt < MAX_ATTEMPTS) {
         R.retry = { retried: true, afterAttempt: attempt,
           why: 'reverted broadcast classified retryable — re-reading the book and re-sizing at current prices for one more attempt' };
-        continue;                                  // EXACTLY ONE retry
+        continue;                                  // EXACTLY ONE retry, reservation stays open
       }
+      // Terminal. A reverted transaction moves NO collateral, so the reservation
+      // converts to an actual spend of 0 — which releases it in full. Committing 0
+      // rather than plain-releasing keeps the ledger honest: the event records that
+      // a real order resolved here, not that a reservation was abandoned.
+      commit(0, reverted
+        ? 'reverted placement — no collateral moved, reservation converted to 0 spend'
+        : 'send-layer failure — no transaction landed, reservation converted to 0 spend');
       return { ok: false, ...R,
         reason: reverted ? 'reverted' : 'send_error',
         detail: reverted
@@ -536,8 +592,12 @@ export async function place_order(input = {}) {
 
     R.yesTokenId = String(M.yesTokenId); R.expiry = Number(M.expiry);
 
-    // --- risk accounting: record what was actually committed
-    if (spentRaw > 0n) recordSpend({ marketId: market_id, spentUsd });
+    // --- risk accounting: resolve the reservation into the REAL spend, releasing
+    // the difference between the reserved worst case and what actually moved.
+    // Note spentUsd is the collateral delta, so a PENDING/NOT_FILLED order that
+    // merely LOCKED collateral at our limit is still counted — that capital is
+    // genuinely committed until the order fills or expires.
+    commit(spentUsd, `fillStatus=${fillStatus}; reserved worst case ${riskApproved?.reservedNowUsd ?? '?'} USD, actual collateral delta ${spentUsd} USD`);
     R.riskStatus = riskSnapshot();
 
     if (fillStatus === 'PENDING') {
@@ -550,8 +610,26 @@ export async function place_order(input = {}) {
 
   // Unreachable in practice: the loop either returns or continues, and the final
   // attempt's failure path returns. Kept so no code path falls off the end.
+  release('attempt loop exhausted without a terminal result');
   return { ok: false, ...R, reason: 'exhausted_attempts',
-    detail: `all ${MAX_ATTEMPTS} attempts finished without a terminal result.` };
+    detail: `all ${MAX_ATTEMPTS} attempts finished without a terminal result.`,
+    riskStatus: riskSnapshot() };
+
+  } finally {
+    // BACKSTOP — a reservation must NEVER leak. Every refusal path above now
+    // releases EXPLICITLY (so the returned payload and the state agree — see the
+    // release() helper), and every real order outcome commits. What remains for
+    // this block is only the genuinely unexpected: a thrown error from any await
+    // in the flow, or a new early return added later that forgets to resolve.
+    // Without it, a leaked reservation would permanently consume capacity that no
+    // real order explains — risk-test.mjs assertion 22 demonstrates that failure.
+    if (reservationId && !reservationResolved) {
+      releaseReservation({ reservationId,
+        why: 'place_order exited without resolving the reservation (thrown error or unexpected exit path) — released by the try/finally backstop' });
+      R.reservation = { reservationId, resolution: 'RELEASED_BY_BACKSTOP',
+        note: 'The flow exited without a terminal order outcome. The reservation was released so it cannot eat capacity with no real order behind it. NOTE: a payload already returned by that exit path cannot show this — it was constructed before this block ran.' };
+    }
+  }
 }
 
 // ============================================================================

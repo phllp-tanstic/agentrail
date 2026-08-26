@@ -14,7 +14,9 @@
 //
 // SCOPE FENCES (deliberate refusals — see build/PHASE-B-LOG.md):
 //   - direction: YES only.   NO-side fills are an open, undetermined phenomenon.
-//   - window:    300s only.  60s books were empty in every sample.
+//   - window:    300s only.  60s depth is UNRELIABLE, not proven absent — runs 1
+//                and 2 both FILLED on 60s markets; a narrow probe found no depth
+//                at one timing offset. The fence is a reliability choice.
 //   - path:      self `placeBinaryOrder` (0x718c2d4d) only. The delegated
 //                `placeBinaryOrderFor` path is gated by OnlyApprovedContracts()
 //                and is closed.
@@ -32,8 +34,11 @@ import { checkPreOrder, commitReservation, releaseReservation, recordSpend,
   recordPayout, riskSnapshot, RISK_CONFIG } from './risk.mjs';
 // Re-exported below as tools; also needed as a local binding, which `export ... from`
 // does not create.
-import { list_wallets as walletList } from './wallet.mjs';
-import { normalizeIntent as normalizeIntentLocal } from './intent.mjs';
+import { list_wallets as walletList, generate_wallet as walletGenerate } from './wallet.mjs';
+import { normalizeIntent as normalizeIntentLocal,
+  normalizeMinSecondsToExpiry as normalizeRunwayLocal } from './intent.mjs';
+import { recordOrder, recordRedeem, recordWallet, recordBalanceObservation,
+  resolveSession } from './trade-log.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -185,7 +190,7 @@ export async function list_markets({ window_seconds = 300, require_yes_liquidity
   min_seconds_to_expiry = 25, max_seconds_to_expiry = 290 } = {}) {
   if (!ALLOWED_WINDOWS.includes(Number(window_seconds))) {
     return { ok: false, refused: true,
-      reason: `window_seconds=${window_seconds} is out of proven scope. Only ${ALLOWED_WINDOWS.join('/')}s windows are supported: 60s books were empty in every sample taken (PROOF-LOG RUN 3 PART 2). Other window lengths are future work, not a supported path.` };
+      reason: `window_seconds=${window_seconds} is out of proven scope. Only ${ALLOWED_WINDOWS.join('/')}s windows are supported. The reason is RELIABILITY, not proven emptiness: at 60s a narrow probe found no depth at one timing offset (0 of 2 sampled books had any levels at T-47s, while 2 of 2 sampled 300s books had 3 levels per side), but PROOF-LOG runs 1 and 2 BOTH FILLED on 60s markets — run 2 read 200 units at T-26s. So 60s liquidity is not dependable at that window length, NOT confirmed absent. That sample is 12 live markets, 4 probed, one moment in time — a snapshot, not a distribution (PROOF-LOG RUN 3 PART 2). Other window lengths are future work, not a supported path.` };
   }
   const { ex } = ctx();
   const live = await ex.client.listLiveBinaryMarkets();
@@ -239,8 +244,14 @@ export async function list_markets({ window_seconds = 300, require_yes_liquidity
 //   - server-side risk guardrails (./risk.mjs) evaluated BEFORE any broadcast
 //   - a reverted broadcast returns {ok:false, reason:'reverted'} instead of
 //     throwing, and gets EXACTLY ONE automatic retry
+//
+// Phase D wraps this in a trade-log adapter (see below place_order_inner): the
+// LOGGING is deliberately outside the execution logic rather than sprinkled
+// through it, because this function has fourteen distinct terminal return paths
+// and a per-return log call would eventually miss one. Wrapping guarantees every
+// outcome — including every refusal and a thrown error — produces exactly one entry.
 // ============================================================================
-export async function place_order(input = {}) {
+async function place_order_inner(input = {}) {
   const {
     market_id, direction = 'YES', cross_ticks = 20, window_seconds = 300,
   } = input;
@@ -680,6 +691,34 @@ export async function place_order(input = {}) {
   }
 }
 
+/**
+ * place_order + the trade-log entry, which is the exported tool.
+ *
+ * A THROWN error is logged and then RE-THROWN unchanged, so the MCP layer's
+ * existing error handling is untouched: an attempted order that blew up is part of
+ * an honest record, but swallowing the throw would change the tool's contract.
+ *
+ * The log write never fails the order — see design note 2 in trade-log.mjs. If the
+ * append fails, `tradeLog.error` says so in the response rather than the order
+ * being reported as failed.
+ */
+export async function place_order(input = {}) {
+  const session_id = input.session_id ?? input.sessionId ?? null;
+  let res;
+  try {
+    res = await place_order_inner(input);
+  } catch (e) {
+    const msg = e.shortMessage ?? e.message;
+    recordOrder({ session_id, input, res: null, thrown: msg });
+    throw e;
+  }
+  const logged = recordOrder({ session_id, input, res });
+  return { ...res, tradeLog: logged.ok
+    ? { recorded: true, seq: logged.seq, sessionId: logged.sessionId,
+        note: 'This outcome is in the append-only trade log. Read it with get_trade_log.' }
+    : { recorded: false, error: logged.error, note: logged.note } };
+}
+
 // ============================================================================
 // TOOL 3 — get_position
 // ERC6909 balance for both outcome token ids + the market's on-chain status.
@@ -720,8 +759,12 @@ export async function get_position({ market_id }) {
 // which is a DISJOINT set and silently reports nothing owed (spec §3 Trap 1).
 // Every leg passes the shared redeemGuard BEFORE any broadcast. A BLOCK refuses
 // and reports; it never falls through to a broadcast.
+//
+// Phase D: wrapped in a trade-log adapter, ONE ENTRY PER LEG. A guard BLOCK is
+// logged exactly as prominently as a payout — that asymmetry is the whole trust
+// story, since a refused redemption is what PRESERVED value here.
 // ============================================================================
-export async function redeem({ market_id = null, dry_run = false } = {}) {
+async function redeem_inner({ market_id = null, dry_run = false } = {}) {
   const { ex, owner } = ctx({ requireKey: true });
   const R = { tool: 'redeem', owner: owner.address, dryRun: !!dry_run, tx: {},
     discovery: {}, legs: [], blocked: [], redeemed: [] };
@@ -839,6 +882,27 @@ export async function redeem({ market_id = null, dry_run = false } = {}) {
 }
 const stripM = ({ m, ...rest }) => ({ ...rest, amount: String(rest.amount) });
 
+/** redeem + one trade-log entry per leg. Thrown errors are logged and re-thrown. */
+export async function redeem({ market_id = null, dry_run = false, session_id = null,
+  sessionId = null } = {}) {
+  const sid = session_id ?? sessionId ?? null;
+  let res;
+  try {
+    res = await redeem_inner({ market_id, dry_run });
+  } catch (e) {
+    const msg = e.shortMessage ?? e.message;
+    recordRedeem({ session_id: sid, res: null, dry_run, thrown: msg });
+    throw e;
+  }
+  const logged = recordRedeem({ session_id: sid, res, dry_run });
+  const failedWrites = logged.filter((l) => !l.ok);
+  return { ...res, tradeLog: failedWrites.length
+    ? { recorded: false, entriesWritten: logged.length - failedWrites.length,
+        error: failedWrites[0].error, note: failedWrites[0].note }
+    : { recorded: true, entries: logged.length, seqs: logged.map((l) => l.seq),
+        note: `${logged.length} entry/entries appended — one per leg, so a guard BLOCK appears separately from any payout. Read them with get_trade_log.` } };
+}
+
 // ============================================================================
 // TOOL 5 — generate_wallet  (re-exported from ./wallet.mjs, no chain access)
 // TOOL 6 — get_wallet_balance
@@ -847,7 +911,25 @@ const stripM = ({ m, ...rest }) => ({ ...rest, amount: String(rest.amount) });
 // build/wallet.mjs for the custody and storage disclosures — this is a CUSTODIAL
 // model over the generated wallet and is deliberately NOT described otherwise.
 // ============================================================================
-export { generate_wallet, list_wallets, STORE_PATH } from './wallet.mjs';
+export { list_wallets, STORE_PATH } from './wallet.mjs';
+
+// ============================================================================
+// TOOL 9 — get_trade_log  (re-exported from ./trade-log.mjs, no chain access)
+// The append-only record every write tool above feeds. See that module's header
+// for why refusals are first-class entries.
+// ============================================================================
+export { get_trade_log, TRADE_LOG_DIR, DEFAULT_SESSION_ID } from './trade-log.mjs';
+
+/** generate_wallet + a trade-log entry. Creation AND the idempotent no-op are logged. */
+export function generate_wallet({ session_id, label = null, force_new = false } = {}) {
+  const res = walletGenerate({ session_id, label, force_new });
+  // Key the log entry to the SAME session id the wallet is stored under, so a
+  // wallet and the orders placed for that session land in one history.
+  const logged = recordWallet({ session_id, res, forceNew: force_new });
+  return { ...res, tradeLog: logged.ok
+    ? { recorded: true, seq: logged.seq, sessionId: logged.sessionId }
+    : { recorded: false, error: logged.error, note: logged.note } };
+}
 
 const SOMI_DEC = 18;   // native gas token
 
@@ -903,8 +985,22 @@ export async function get_wallet_balance({ session_id = null, address = null } =
   const canPayGas = somiRaw > 0n;
   const hasCollateral = usdcRaw > 0n;
 
+  // --- DEPOSIT LOGGING, by observation. AgentRail has no deposit tool by design
+  // (in production the user deposits from their own wallet), so the only honest way
+  // to get deposits into the trade log is to notice a balance change here. An entry
+  // is written only when something actually moved; the first read is a baseline.
+  const obs = recordBalanceObservation({
+    session_id: session_id ?? record?.sessionId ?? null,
+    address: resolved, tUSDC: tusdc, SOMI: somi,
+    readyToTrade: hasCollateral && canPayGas, known });
+
   return { ok: true,
     address: resolved, known,
+    tradeLog: obs.skipped
+      ? { recorded: false, unchanged: true, note: obs.reason }
+      : obs.ok ? { recorded: true, seq: obs.seq, sessionId: obs.sessionId,
+          note: 'A balance CHANGE was recorded in the trade log, marked actor:"OBSERVED" — AgentRail noticed it on-chain and did not perform it.' }
+        : { recorded: false, error: obs.error, note: obs.note },
     ...(record ? { sessionId: record.sessionId, createdAt: record.createdAt, label: record.label } : {}),
     ...(known ? {} : { unknownNote: 'This address is NOT in the wallet store. Balances are public reads so they are still reported, but AgentRail holds no key for it and cannot sign on its behalf.' }),
     balances: {
@@ -941,12 +1037,25 @@ export async function get_wallet_balance({ session_id = null, address = null } =
 // place_order after the user confirms.
 // ============================================================================
 export { normalizeIntent, SUPPORTED_ASSETS } from './intent.mjs';
+export { normalizeMinSecondsToExpiry, DEFAULT_MIN_SECONDS_TO_EXPIRY } from './intent.mjs';
+
+// list_markets' own upper bound on runway for a 300s window. Used only to tell a
+// caller when a floor they asked for is unsatisfiable BY CONSTRUCTION rather than
+// by current market conditions — a different problem with a different remedy.
+const LIST_MARKETS_MAX_SECONDS_TO_EXPIRY = 290;
 
 export async function parse_intent(input = {}) {
   const norm = normalizeIntentLocal(input);
   if (!norm.ok) return { tool: 'parse_intent', ...norm };
 
+  // --- runway floor: how much time must remain for a market to be SELECTABLE.
+  // See intent.mjs for why the default is 60s and why a non-finite value must not
+  // be passed through to the comparison.
+  const RUN = normalizeRunwayLocal(input.min_seconds_to_expiry ?? input.minSecondsToExpiry);
+  const minSec = RUN.value;
+
   const R = { ok: true, tool: 'parse_intent', ...norm,
+    warnings: [...(norm.warnings ?? []), ...(RUN.warning ? [RUN.warning] : [])],
     placedAnything: false,
     contract: 'This tool VALIDATES and NORMALIZES intent. It does not place an order. Pass `placeOrderArgs` to place_order after the user confirms.' };
 
@@ -956,7 +1065,14 @@ export async function parse_intent(input = {}) {
   }
 
   // --- resolve asset -> a live, gated, liquid market of the right window
-  const lm = await list_markets({ window_seconds: norm.normalized.windowSeconds });
+  //
+  // Deliberately asks list_markets for a WIDER set than we intend to select from:
+  // its own floor is lowered to min(ourFloor, 25) so markets that fail OUR floor
+  // are still returned and can be REPORTED as skipped rather than silently
+  // vanishing. Filtering at the list_markets layer would have hidden exactly the
+  // timing information this floor exists to make visible.
+  const lm = await list_markets({ window_seconds: norm.normalized.windowSeconds,
+    min_seconds_to_expiry: Math.min(minSec, 25) });
   if (!lm.ok) {
     return { ...R, marketResolution: { attempted: true, resolved: false,
       note: `list_markets refused: ${lm.reason}` } };
@@ -975,15 +1091,54 @@ export async function parse_intent(input = {}) {
       suggestion: 'Retry in the next window, or re-issue for an asset in assetsAvailable.' };
   }
 
-  // Soonest settlement first, matching list_markets' own ordering.
-  const M = candidates[0];
+  // --- apply the runway floor to SELECTION, not to visibility
+  const runwayOf = (c) => ({ marketId: c.marketId, secondsToExpiry: c.secondsToExpiry });
+  const qualified = candidates.filter((c) => c.secondsToExpiry >= minSec);
+  const tooSoon = candidates.filter((c) => c.secondsToExpiry < minSec);
+
+  if (!qualified.length) {
+    // A DISTINCT condition from no_tradeable_market, kept separate for the same
+    // reason window_unrecognized and window_not_supported are: the remedies differ.
+    // Here markets for this asset DO exist and ARE open — they all just settle too
+    // soon to put a confirmation in front of a human. A caller told
+    // "no tradeable market" would wrongly report the venue as having nothing.
+    const impossible = minSec > LIST_MARKETS_MAX_SECONDS_TO_EXPIRY;
+    return { ok: false, refused: true, tool: 'parse_intent',
+      reason: 'no_market_with_adequate_runway',
+      detail: `intent is valid and ${candidates.length} tradeable ${norm.normalized.asset} market(s) are open right now, but every one of them settles in less than the required min_seconds_to_expiry=${minSec}s (soonest ${Math.min(...candidates.map((c) => c.secondsToExpiry))}s, longest ${Math.max(...candidates.map((c) => c.secondsToExpiry))}s). Refusing rather than resolving to one of them, because a confirm-before-execute flow needs enough runway for the user to READ the confirmation and reply — otherwise they approve a bet whose window has already closed, and place_order then refuses on status_gate_closed. This is NOT "no market available" (they exist) and NOT an invalid request.${impossible ? ` NOTE: min_seconds_to_expiry=${minSec}s is unsatisfiable BY CONSTRUCTION, not by current conditions — list_markets caps runway at ${LIST_MARKETS_MAX_SECONDS_TO_EXPIRY}s, so no ${norm.normalized.windowSeconds}s window can ever clear this floor.` : ''}`,
+      normalized: norm.normalized,
+      warnings: R.warnings,
+      marketResolution: { attempted: true, resolved: false,
+        minSecondsToExpiry: minSec,
+        candidatesConsidered: candidates.length, candidatesClearingFloor: 0,
+        skippedForInadequateRunway: tooSoon.map(runwayOf),
+        ...(impossible ? { floorUnsatisfiableByConstruction: true,
+          maxPossibleSecondsToExpiry: LIST_MARKETS_MAX_SECONDS_TO_EXPIRY } : {}) },
+      suggestion: impossible
+        ? `Lower min_seconds_to_expiry below ${LIST_MARKETS_MAX_SECONDS_TO_EXPIRY} — no ${norm.normalized.windowSeconds}s window is ever listed with more runway than that.`
+        : `Either wait for the next window to open (a fresh 300s market appears regularly) or, if this caller has no human confirmation step, re-issue with a lower min_seconds_to_expiry. Do not silently accept a shorter window on the user's behalf — the timing is the thing being refused.` };
+  }
+
+  // Soonest settlement AMONG THOSE WITH ADEQUATE RUNWAY. Still soonest-first, which
+  // is what a momentum trader wants; the floor only removes the ones too close to
+  // expiry to confirm. `min_seconds_to_expiry: 0` restores the old behaviour exactly.
+  const M = qualified[0];
   R.placeOrderArgs = { market_id: M.marketId, ...R.placeOrderArgs };
   R.marketResolution = { attempted: true, resolved: true,
     marketId: M.marketId, asset: M.asset, pool: M.pool,
     secondsToExpiry: M.secondsToExpiry, statusGate: M.statusGate,
     bestYesAskProb: M.bestYesAskProb, yesAskDepthUnits: M.yesAskDepthUnits,
-    otherCandidates: candidates.slice(1).map((c) => ({ marketId: c.marketId, secondsToExpiry: c.secondsToExpiry })),
-    selectedBy: 'soonest settlement among tradeable markets for this asset (list_markets ordering)' };
+    otherCandidates: candidates.filter((c) => c.marketId !== M.marketId).map((c) => ({
+      ...runwayOf(c), belowRunwayFloor: c.secondsToExpiry < minSec })),
+    runway: {
+      minSecondsToExpiry: minSec,
+      selectedSecondsToExpiry: M.secondsToExpiry,
+      candidatesConsidered: candidates.length,
+      candidatesClearingFloor: qualified.length,
+      skippedForInadequateRunway: tooSoon.map(runwayOf),
+      ...(RUN.wasDefaulted ? { floorWasDefaulted: true } : {}),
+      note: 'A FLOOR on selection, not a replacement for surfacing real timing — every candidate is still listed in otherCandidates with its own secondsToExpiry, including the ones skipped for being too close to expiry. Selection remains soonest-settlement-first among those that clear the floor. Pass min_seconds_to_expiry: 0 to disable it (appropriate only for a caller with no human confirmation step).' },
+    selectedBy: `soonest settlement among tradeable ${norm.normalized.asset} markets that clear min_seconds_to_expiry=${minSec}s (list_markets ordering, then the runway floor)` };
 
   // --- confirm-before-execute summary (spec §2: show stake/direction/window/payout)
   const ask = M.bestYesAskProb === null ? null : Number(M.bestYesAskProb);
@@ -1019,6 +1174,7 @@ export async function parse_intent(input = {}) {
       : `Buy ${norm.normalized.stake_units} units of ${norm.normalized.asset} ${norm.normalized.direction} on a ${norm.normalized.windowSeconds}s window settling in ${M.secondsToExpiry}s.`,
     direction: norm.normalized.direction, asset: norm.normalized.asset,
     windowSeconds: norm.normalized.windowSeconds, settlesInSeconds: M.secondsToExpiry,
+    runwayNote: `This market settles in ${M.secondsToExpiry}s. The order must be placed BEFORE then — if the user takes longer than that to confirm, place_order will correctly refuse on status_gate_closed and nothing will be bet. A minimum of ${minSec}s of runway was required for this market to be selectable at all.`,
     economics,
     riskLimits: { maxStakePerWindowUsd: RISK_CONFIG.maxStakePerWindowUsd,
       maxDailyLossUsd: RISK_CONFIG.maxDailyLossUsd,

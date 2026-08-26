@@ -62,6 +62,8 @@ server.registerTool('place_order', {
       .describe('How many ticks above the best resting ask to bid. 20 is the value that filled in the Phase A proof.'),
     window_seconds: z.number().int().default(300)
       .describe('Asserted against the market\'s actual intervalSec; a mismatch is refused.'),
+    session_id: z.string().optional()
+      .describe('Which user/session trade log to record this order under. Optional — defaults to AGENTRAIL_SESSION_ID or "default". Pass the same session_id used for generate_wallet to keep one user\'s wallet, orders and redemptions in a single history.'),
   },
 }, wrap(core.place_order));
 
@@ -79,6 +81,8 @@ server.registerTool('redeem', {
       .describe('Restrict to one market. Omit to scan every finalized market for held positions.'),
     dry_run: z.boolean().default(false)
       .describe('Run discovery and the guard, report what would happen, broadcast nothing.'),
+    session_id: z.string().optional()
+      .describe('Which user/session trade log to record each leg under. Optional — defaults to AGENTRAIL_SESSION_ID or "default". Every leg gets its own entry, so a guard BLOCK is logged separately from any payout.'),
   },
 }, wrap(core.redeem));
 
@@ -110,7 +114,7 @@ server.registerTool('list_wallets', {
 
 server.registerTool('parse_intent', {
   title: 'Validate and normalize a trading intent into place_order arguments',
-  description: `Takes ALREADY-EXTRACTED structured intent and returns exactly what place_order needs, refusing anything unsupported before it can reach the chain. THIS TOOL DOES NOT DO NATURAL-LANGUAGE UNDERSTANDING and does not call an LLM — YOU (the calling agent) read the user's sentence and extract direction/asset/window/amount; this validates and normalizes them deterministically. It accepts synonyms (up/long -> YES, bitcoin -> BTC, "5m" -> 300, "$10" -> 10), resolves the asset to a live gated market with real YES depth, and returns a \`confirmation\` block with estimated units, cost, max payout and payout multiple to show the user BEFORE executing. IT PLACES NOTHING — pass the returned \`placeOrderArgs\` to place_order after the user confirms. Refusals use stable machine codes in \`reason\`: direction_not_supported (NO side — never filled at any expressible price, cause undetermined), window_not_supported (only 300s is proven), asset_not_supported, ambiguous_sizing, sizing_required, invalid_target_dollar_amount, no_tradeable_market (transient, not invalid). ${SCOPE}`,
+  description: `Takes ALREADY-EXTRACTED structured intent and returns exactly what place_order needs, refusing anything unsupported before it can reach the chain. THIS TOOL DOES NOT DO NATURAL-LANGUAGE UNDERSTANDING and does not call an LLM — YOU (the calling agent) read the user's sentence and extract direction/asset/window/amount; this validates and normalizes them deterministically. It accepts synonyms (up/long -> YES, bitcoin -> BTC, "5m" -> 300, "$10" -> 10), resolves the asset to a live gated market with real YES depth, and returns a \`confirmation\` block with estimated units, cost, max payout and payout multiple to show the user BEFORE executing. IT PLACES NOTHING — pass the returned \`placeOrderArgs\` to place_order after the user confirms. Refusals use stable machine codes in \`reason\`: direction_not_supported (NO side — never filled at any expressible price, cause undetermined), window_not_supported (only 300s is proven; 60s liquidity is UNRELIABLE, not confirmed empty), asset_not_supported, ambiguous_sizing, sizing_required, invalid_target_dollar_amount, no_tradeable_market (transient, not invalid), no_market_with_adequate_runway (markets exist but all settle too soon to confirm — see min_seconds_to_expiry). ${SCOPE}`,
   inputSchema: {
     direction: z.string().optional()
       .describe('Direction the user wants, as extracted. Synonyms accepted: YES/up/long/higher/bullish -> YES; NO/down/short/lower/bearish -> NO (refused, with the documented reason).'),
@@ -126,9 +130,30 @@ server.registerTool('parse_intent', {
     cross_ticks: z.number().int().optional().describe('Passed through to place_order. Defaults to the proven 20 if omitted.'),
     resolve_market: z.boolean().default(true)
       .describe('Resolve the asset to a live market_id (needs a market read). Set false to validate the intent only, offline; placeOrderArgs is then incomplete.'),
+    min_seconds_to_expiry: z.union([z.number(), z.string()]).optional()
+      .describe('Minimum runway a market must have to be SELECTABLE, in seconds (accepts 90, "90s", "2m"). Defaults to 60 — enough time for a human to read the confirmation and reply before the window closes. Markets below it are skipped rather than selected, and are still reported in marketResolution.runway.skippedForInadequateRunway with their real secondsToExpiry, so nothing is hidden. If markets exist but none clear the floor, the refusal is the DISTINCT code no_market_with_adequate_runway, not no_tradeable_market. Pass 0 to disable the floor (only appropriate for a caller with no human confirmation step).'),
     raw_text: z.string().optional()
       .describe('The user\'s original sentence. Echoed back for audit ONLY — it is never parsed by this tool.'),
   },
 }, wrap(core.parse_intent));
+
+server.registerTool('get_trade_log', {
+  title: 'Read the append-only record of everything AgentRail did for a user',
+  description: `The auditable trade log (spec §2/§6). Append-only JSON Lines, one file per session, never rewritten. Records order placements with their three-state fill outcome (FILLED / PENDING / NOT_FILLED, kept distinct — a PENDING order is NOT a non-fill), redemptions PER LEG, wallet generation, and observed deposits. REFUSALS ARE FIRST-CLASS ENTRIES, not omissions: a redemption BLOCKed by the guard is logged as prominently as one that paid out, together with the guard's reason and the fact that the position was left intact rather than burned — a log that recorded only successes would read as a complete history while hiding the decisions that mattered most. Every entry carries a self-contained \`summary\` that explains itself without cross-referencing any other entry or tool. \`actor\` separates what AgentRail DID ("AGENTRAIL") from on-chain facts it merely NOTICED ("OBSERVED") — a user's deposit is the latter, since AgentRail has no deposit tool by design. Returns counts over the whole file even when the entry list is filtered or truncated, and reports \`elided\` plus an \`integrity\` block (malformed lines, seq uniqueness) so a partial view is never mistaken for the whole record. No entry ever contains private key material.`,
+  inputSchema: {
+    session_id: z.string().optional()
+      .describe('Whose history to read. Defaults to AGENTRAIL_SESSION_ID or "default". The response lists sessionsKnown if you need to discover ids.'),
+    limit: z.number().int().default(50)
+      .describe('Maximum entries to return. The MOST RECENT matching entries are returned and `elided` reports how many older ones were left out.'),
+    kind: z.enum(['ORDER', 'REDEEM', 'WALLET']).optional()
+      .describe('Filter to one category. Summary counts still cover the whole file.'),
+    outcome: z.string().optional()
+      .describe('Filter by outcome, e.g. FILLED, PENDING, NOT_FILLED, REFUSED, REVERTED, REDEEMED, BLOCKED, ZERO_PAYOUT, CREATED, DEPOSIT.'),
+    refusals_only: z.boolean().default(false)
+      .describe('Return only entries where ok:false — every refusal, block, revert and error. Use this for "show me everything AgentRail declined to do, and why".'),
+    include_dry_runs: z.boolean().default(true)
+      .describe('Dry-run redeem entries are logged and flagged dryRun:true so they can never be mistaken for a real broadcast. Set false to exclude them.'),
+  },
+}, wrap(core.get_trade_log));
 
 await server.connect(new StdioServerTransport());

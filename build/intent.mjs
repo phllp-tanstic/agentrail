@@ -62,6 +62,44 @@ export function normalizeDollarAmount(raw) {
   return Number.isFinite(n) ? n : null;
 }
 
+// How much time must remain before settlement for a market to be SELECTABLE.
+//
+// 60s, because the flow this feeds is confirm-before-execute (spec §2): the user
+// has to READ the stake/direction/window/payout summary and reply before the
+// window closes. A market resolved with 20s left produces a confirmation for a bet
+// that is gone by the time anyone answers — place_order then correctly refuses on
+// `status_gate_closed`, but the user was shown something that was never available.
+export const DEFAULT_MIN_SECONDS_TO_EXPIRY = 60;
+
+/**
+ * Validate a runway floor. Returns { value, warning } — never a refusal, because
+ * every degenerate input here has an unambiguous safe normalization.
+ *
+ * THE NON-FINITE CASE IS THE ONE THAT MATTERS. The floor is applied as
+ * `secondsToExpiry >= floor`, and EVERY comparison against NaN is false, so a
+ * non-numeric floor would silently reject every market and report "no market has
+ * adequate runway" — a refusal that looks correct and states a false cause. That is
+ * the same class of defect as the `maxSlippagePct` NaN bug fixed in Task 0, reached
+ * from a different input, so it is handled the same way: fall back to the default
+ * and say so in a warning rather than passing NaN through.
+ */
+export function normalizeMinSecondsToExpiry(raw,
+  { defaultSeconds = DEFAULT_MIN_SECONDS_TO_EXPIRY } = {}) {
+  if (raw === null || raw === undefined || raw === '') {
+    return { value: defaultSeconds, warning: null, wasDefaulted: true };
+  }
+  const n = normalizeWindowSeconds(raw);          // accepts 90, "90", "90s", "2m"
+  if (n === null) {
+    return { value: defaultSeconds, wasDefaulted: true,
+      warning: `min_seconds_to_expiry=${JSON.stringify(raw)} is not an interpretable duration and was replaced with the default of ${defaultSeconds}s. It was deliberately NOT passed through: the floor is applied as \`secondsToExpiry >= floor\` and every comparison against NaN is false, so a non-numeric floor would have silently rejected EVERY market and refused with "no market has adequate runway" — a refusal stating a cause that was not the real one.` };
+  }
+  if (n < 0) {
+    return { value: 0, wasDefaulted: false,
+      warning: `min_seconds_to_expiry=${JSON.stringify(raw)} is negative and was raised to 0, which means NO runway floor. A negative floor is meaningless rather than unsafe — every market clears it — so it is normalized rather than refused. Note this disables the protection: the soonest-settling market becomes selectable again.` };
+  }
+  return { value: n, warning: null, wasDefaulted: false };
+}
+
 const refuse = (reason, detail, extra = {}) =>
   ({ ok: false, refused: true, reason, detail, ...extra });
 
@@ -129,7 +167,7 @@ export function normalizeIntent(input = {}) {
     // Stated accurately: the 60s evidence is a SNAPSHOT, and 60s markets HAVE
     // filled before. The fence is a reliability choice, not a proof of emptiness.
     const sixty = windowSeconds === 60
-      ? ' Specifically for 60s: the evidence is a snapshot, not a distribution — 0 of 2 sampled 60s books had any depth at T-47s, while 2 of 2 sampled 300s books had 3 levels per side. Runs 1 and 2 DID fill on 60s markets, so the accurate statement is that 60s depth is UNRELIABLE, not that it is always absent. The fence is a deliberate reliability choice (PROOF-LOG RUN 3 PART 2).'
+      ? ' Specifically for 60s: liquidity there is UNRELIABLE, NOT confirmed empty, and the fence is a deliberate reliability choice rather than a claim that no depth exists. The evidence is a snapshot, not a distribution — a separate narrow probe found no depth at ONE specific timing offset (0 of 2 sampled 60s books had any levels at T-47s, while 2 of 2 sampled 300s books had 3 levels per side), against which PROOF-LOG runs 1 and 2 BOTH DID fill on 60s markets, run 2 reading 200 units at T-26s. Sampling caps: 12 live markets, 4 probed, one moment in time. So the accurate statement is that 60s depth is not DEPENDABLE, not that it is absent (PROOF-LOG RUN 3 PART 2).'
       : '';
     return refuse('window_not_supported',
       `window resolved to ${windowSeconds}s (from ${JSON.stringify(winRaw)}), which is outside the proven scope of ${SUPPORTED_WINDOWS.join('/')}s and is refused rather than attempted.${sixty}`,

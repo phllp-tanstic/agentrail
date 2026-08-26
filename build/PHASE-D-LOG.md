@@ -500,3 +500,368 @@ to match.
 - Not started, as scoped: momentum-ladder mode.
 
 ---
+
+# PHASE D — CONTINUED (tasks A and B)
+
+Same session, later. Tasks 0–2 above are committed (`549c2b2`). What follows is two
+precision fixes to `parse_intent` and the trade log, which the section above listed
+as "explicitly next session's work, not started".
+
+---
+
+## TASK A.1 — the 60s refusal wording
+
+**The claim to fix was not where the brief expected it.** `parse_intent`'s own 60s
+refusal was *already* accurate — Task 2 above corrected it in the previous session
+and pinned it with assertion 6. Re-reading it confirmed it said "UNRELIABLE, not
+that it is always absent" and cited runs 1 and 2 filling on 60s markets.
+
+Grepping for the absolute phrasing found it in a **different, user-facing refusal**:
+
+```js
+// build/mcp-core.mjs — list_markets
+`Only 300s windows are supported: 60s books were empty in every sample taken`
+```
+
+plus the same claim in mcp-core's scope-fence header comment. So the correction was
+applied there. Two notes on why that is the same fix rather than a wider one:
+
+- It is the identical overreach in the identical codebase, in a refusal a caller
+  reads. Leaving it would mean `parse_intent` and `list_markets` state *different*
+  strengths of claim about the same evidence.
+- `parse_intent` cannot surface it — `normalizeIntent` refuses a 60s window before
+  the market read, so the value reaching `list_markets` is always 300. The
+  inaccuracy was reachable only by calling `list_markets` directly, which an agent
+  is expected to do.
+
+Both now say what PROOF-LOG's own verdict says — *"treat 60s as unreliable"*, and
+*"so 60s books do fill in"*. `parse_intent`'s wording was sharpened further to state
+**"UNRELIABLE, NOT confirmed empty"** and to say the probe covered **one specific
+timing offset**, rather than leaving the reader to infer that from "T-47s".
+
+**Not changed:** `part3-win-proof.mjs` and `phase-a-lifecycle.mjs` carry the phrase
+in comments. Those are historical run scripts whose output is already in PROOF-LOG,
+and their wording is precise about its own sample ("empty 2/2 at T-47s"). Rewriting a
+completed run's comments would edit the record rather than the product.
+
+Assertion 6 was tightened to fail on the absolute phrasing, not just to look for the
+accurate one — it now asserts `!/(were|are|always)\s+empty/` against the detail, so
+the claim cannot regress silently.
+
+---
+
+## TASK A.2 — `min_seconds_to_expiry` on `parse_intent`
+
+**Implemented.** Default **60s** — the number is chosen for the confirm step, not
+the market: the user has to read stake/direction/window/payout and reply, and the
+Phase D finding above recorded a live resolution at **49s to expiry**, which cannot
+survive that exchange.
+
+Pure validation lives in `intent.mjs` as `normalizeMinSecondsToExpiry` (accepts
+`90`, `"90"`, `"90s"`, `"2m"`), so it is offline-testable like the rest of that
+module. `parse_intent` applies it to **selection**.
+
+### The floor is applied to selection, NOT to visibility — deliberately
+
+The obvious implementation is to pass the floor down to `list_markets`, which
+already has a `min_seconds_to_expiry` parameter. **That would have hidden exactly the
+information this feature exists to surface.** A filtered-out market is invisible in
+the response, so a caller could not see that a nearer window existed and was
+declined. Instead `parse_intent` asks `list_markets` for a *wider* set
+(`min(ourFloor, 25)`) and applies its own floor afterwards, so:
+
+- `otherCandidates` still lists every alternative with its real `secondsToExpiry`,
+  now annotated `belowRunwayFloor: true|false`
+- `marketResolution.runway.skippedForInadequateRunway` names what was dropped
+- `confirmation.runwayNote` states the real runway to the user
+- `min_seconds_to_expiry: 0` reproduces the old behaviour exactly
+
+### The same NaN class of defect, caught before it shipped
+
+The floor is applied as `secondsToExpiry >= floor`. **Every comparison against NaN is
+false**, so `min_seconds_to_expiry: "soon"` would have rejected *every* market and
+refused with `no_market_with_adequate_runway` — a refusal that looks correct and
+states a cause that is not the real one. That is the Task 0 slippage defect reached
+from a different input, so it is handled the same way: fall back to the default and
+attach a warning saying why it was not passed through. A **negative** floor is
+normalized to 0 with a warning that the protection is now off (meaningless rather
+than unsafe — every market clears it).
+
+### A new refusal code, kept distinct on purpose
+
+`no_market_with_adequate_runway` is **not** `no_tradeable_market`. Same distinction
+as `window_unrecognized` vs `window_not_supported`: the remedies differ. Markets for
+the asset exist and are **open** — they just all settle too soon to confirm. A caller
+told "no tradeable market" would wrongly report the venue as having nothing. The
+detail says so explicitly (`NOT "no market available" (they exist)`), and when the
+floor exceeds `list_markets`' own 290s ceiling it says the floor is **unsatisfiable
+by construction, not by conditions** — a caller told "conditions" retries forever.
+
+### Test — 29/29 offline (`build/intent-test.mjs`, +5 new)
+
+| # | Case | Result |
+|---|---|---|
+| 25 | default is 60s, flagged `wasDefaulted` | PASS |
+| 26 | `90` / `"90"` / `"90s"` / `"2m"`→120 / `0` / `45` | PASS — 6 forms |
+| 27 | `"soon"` → falls back to 60 **with the NaN explanation** | PASS |
+| 28 | `-30` → 0, warning says the protection is off | PASS |
+| 29 | the floor never leaks into `placeOrderArgs` | PASS |
+
+### Test — 11/11 live, and it reproduced the exact bad case
+
+Polled live markets until one fell below the floor, then ran the **same intent twice
+back to back**:
+
+| Floor | Result |
+|---|---|
+| `0` | resolved market `…9f40` at **T=55s** — the old behaviour, reproduced |
+| `60` (default) | **refused** `no_market_with_adequate_runway`, reporting the 53s market it declined |
+
+Plus: `285` → refusal naming every skipped market with its timing; `400` →
+`floorUnsatisfiableByConstruction: true`; a non-numeric floor still resolved a market
+(T=262s) under the fallback rather than refusing everything.
+
+Timing assertions are inequalities, never equality — the clock moves between two RPC
+round-trips (a market read at T=98s reads 94s moments later), so an equality
+assertion would fail for reasons that are not the code's.
+
+### Finding — the floor is a GATE, not a SELECTOR, and the earlier session overstated the mitigation
+
+Probing `listLiveBinaryMarkets` directly (no order-book or status reads) shows the
+venue lists **exactly one market per (asset, interval) pair**:
+
+```
+BTC interval=  60s T=  26s     BTC interval= 300s T= 266s     BTC interval=3600s T=2066s
+ETH interval=  60s T=  26s     ETH interval= 300s T= 266s     ETH interval=3600s T=2066s
+...12 live markets, and 300s windows per asset: {"BTC":[266],"ETH":[266]}
+```
+
+So for a single asset on a 300s window there is **never a second candidate**.
+Consequences, stated because they change what this fix actually does:
+
+1. **`otherCandidates` is empty in practice.** The Phase D finding above proposed the
+   floor partly because "`otherCandidates` lists the alternatives so a caller can
+   choose a longer one". **There are no alternatives.** That mitigation was
+   over-optimistic and is corrected here.
+2. **The observable behaviour is refusal, not substitution.** The "skip to a later
+   market" path is implemented and correct, but is unreachable under current venue
+   behaviour. The live test therefore proves the **refusal** branch; the selection
+   branch is proven only by the floor arithmetic. Flagged rather than implied.
+3. **A real UX cost: the last 60s of every 300s cycle now refuses.** That is ~20% of
+   wall-clock time in which a valid request is answered "wait for the next window".
+   That is the right trade for a confirm-before-execute flow — showing a confirmation
+   for a window that closes mid-conversation is worse — but it is a cost, not free,
+   and the demo should expect to hit it.
+
+---
+
+## TASK B — the trade log
+
+**Implemented.** New module `build/trade-log.mjs` (append-only store + adapters, no
+chain access) and `get_trade_log`, registered as the **9th** MCP tool. Storage is
+JSON Lines, one file per session, at `AGENTRAIL_TRADE_LOG_DIR` or
+`build/.trade-log/<session>.jsonl`. **`.gitignore` was updated before any file
+existed** — verified with `git check-ignore`, and `git status` does not list it.
+
+### The design point: a log that recorded only successes would be worse than none
+
+It would read as a complete history while hiding the decisions that mattered most. So
+refusals are **first-class entries**, not errors dropped on the way out:
+
+| Live entry | What it records |
+|---|---|
+| `ORDER → REFUSED (slippage_exceeded)` | *"NOTHING was broadcast"*, the machine reason, the prose why, and `riskReservation: RELEASED` |
+| `ORDER → FILLED` | 0.458 units of ETH YES for 0.349912 tUSDC, variance −0.0251%, confirmed by ERC6909 delta |
+| `REDEEM → REDEEMED` | paid 0.458 tUSDC, *"NOT transaction status — a losing redeem also returns success"* |
+| `WALLET → CREATED` | the address, `CUSTODIAL`, `privateKeyReturned: false`, and that signing is not wired up |
+| `WALLET → BASELINE` (`actor: OBSERVED`) | first balance read, explaining why no delta is shown |
+
+### Six decisions worth recording
+
+**1. Logging is wrapped AROUND `place_order`, not sprinkled through it.** That
+function has **fourteen distinct terminal return paths**; a log call at each one
+would eventually miss a new one. The core became `place_order_inner` and the export
+wraps it, so every outcome — every refusal, a revert, a send error, and a thrown
+error — produces exactly one entry by construction. `redeem` got the same treatment.
+
+**2. A log write NEVER fails the action it records.** Every append is wrapped and
+returns an error object rather than throwing. This is the one place the log is
+allowed to lose information, and the reasoning is specific: by the time an order
+outcome is logged, **the transaction has already broadcast**. Throwing there would
+report a failure for an order that really filled and would unwind risk accounting for
+a trade that genuinely happened — corrupting real state to protect a record of it.
+The failure surfaces as `tradeLog.error` in the response instead of vanishing.
+Assertions 29–30 pin this by monkeypatching `appendFileSync` to throw.
+
+**3. A thrown error is logged and RE-THROWN unchanged.** An attempted order that blew
+up belongs in an honest record, but swallowing the throw would change the tool's
+contract. Its entry says the outcome is **UNKNOWN from that entry alone** and names
+`get_position` as the way to find out — it does not claim nothing happened.
+
+**4. Session ids are sanitised before becoming filenames.** A caller-supplied string
+used as a path is a directory traversal. Only `[A-Za-z0-9._-]` survives, `..` is
+collapsed, and an id with no alphanumerics becomes `unnamed` rather than a filename of
+punctuation. **Disclosed rather than hidden: sanitisation is not injective** —
+`"a/b"` and `"a_b"` share a file — so every entry carries the *original* id, keeping
+the file unambiguous when two sessions collide into it. Assertion 2 proves
+empirically that `"../../pwned"` writes inside the log dir.
+
+**5. Actions and observations are marked differently (`actor`).** `AGENTRAIL` means
+AgentRail did it; `OBSERVED` means AgentRail noticed an on-chain fact it did not
+cause. **This is what makes deposits loggable at all:** AgentRail has no deposit tool
+by design — in production the user deposits from their own wallet — so a deposit can
+only be observed. `get_wallet_balance` compares against the last recorded balance and
+writes `DEPOSIT_OBSERVED` / `BALANCE_DECREASE_OBSERVED` only when something actually
+moved, with `performedByAgentRail: false`. Conflating the two would be a false claim
+about a money movement. A decrease is logged too, flagged as usually an order's
+collateral spend — logging only increases would leave gaps in a record that claims to
+be complete.
+
+**6. One entry PER REDEEM LEG.** A BLOCK and a payout in the same call must not merge
+into a single "redeem happened" line — the refusal is the point. A `BLOCKED` entry
+states the position was *"left INTACT, not burned"* and why that matters (a losing
+redeem does not revert; it burns the position and pays zero with a success receipt).
+Dry runs are logged but flagged `dryRun: true` so they can never read as a real
+broadcast.
+
+**PENDING is never collapsed.** `fill.filled` stays `null` and the summary says *"NOT
+a non-fill… may still fill before expiry… Recheck with get_position"*.
+
+### Deliberately NOT logged, and why
+
+`parse_intent` and `list_markets`. Both validate or read and place nothing, and a
+caller may run `parse_intent` speculatively many times per real order — logging them
+would bury the actions the file exists to record. **That is a judgement call, not an
+oversight**, and it cuts against the trust story in one way worth naming: a
+`parse_intent` refusal *is* a refusal, and "the agent declined before touching the
+chain" is a good demo beat. The module header says where a `recordIntent()` adapter
+would go if that is wanted.
+
+### Test — 31/31 offline (`build/trade-log-test.mjs`, new, re-runnable)
+
+`node build/trade-log-test.mjs`, no network, throwaway temp log dir so it can never
+touch a real history. Adapters are driven with **synthetic** tool responses on
+purpose: the outcomes hardest to produce on demand against a live venue — a guard
+BLOCK, a PENDING fill, a reverted broadcast, a zero payout — are exactly the ones an
+audit log must get right, so they are pinned deterministically.
+
+Coverage: 4 sanitisation/traversal cases · 6 order outcomes (FILLED / PENDING /
+NOT_FILLED / REFUSED / REVERTED / thrown) · 6 redeem cases (BLOCK + payout in one call
+as two entries, ZERO_PAYOUT flagged as guard failure, dry run, nothing-owed) · 6
+wallet/deposit cases incl. the unchanged-balance no-op · 5 read-side cases ·
+append-only verified **byte-wise** (new content starts with the exact previous bytes)
+· malformed-line reporting · the two never-throw assertions · key material.
+
+**Key non-leakage, in its strongest form.** A substring search for `privateKey` is
+misleading here — the wallet adapter legitimately writes the field *name*
+`privateKeyReturned: false`, an assertion rather than key material. So the offline
+check is structural (no adapter dereferences `.privateKey` or calls
+`_privateKeyForSession`; no entry carries a `"privateKey":` field), and the live suite
+reads the **actual key** out of the store and asserts that exact string appears
+nowhere in the real log file:
+
+```
+store holds a real key for this session:   true
+that exact key appears in the log file:    false
+```
+
+### Test — live, a complete round trip in one log
+
+Session `phase-d-tradelog`, real actions in order, then read back through the tool:
+
+| # | Entry | Live result |
+|---|---|---|
+| 1 | `WALLET/WALLET_CREATED` | `0x288fB1b3…4Da7`, custody stated, no key returned |
+| 2 | `WALLET/BALANCE_FIRST_OBSERVED` | baseline 0 tUSDC / 0 SOMI, `actor: OBSERVED` |
+| 3 | `ORDER/PLACE_ORDER → REFUSED` | `slippage_exceeded`, nothing broadcast, reservation **RELEASED** |
+| 4 | `ORDER/PLACE_ORDER → FILLED` | **0.458 units for 0.349912 tUSDC**, variance −0.0251% |
+| 5 | `REDEEM/REDEEM_SCAN → NOTHING_OWED` | 100 finalized scanned, distinct from a refusal |
+| 6 | `REDEEM/REDEEM_LEG → WOULD_REDEEM` | dry run, guard **ALLOW**, flagged `dryRun` |
+| 7 | `REDEEM/REDEEM_LEG → REDEEMED` | **paid 0.458 tUSDC**, confirmed by balance delta |
+
+```
+total=7  refusedOrFailed=1  observations=1  dryRuns=2
+byKind={"WALLET":2,"ORDER":2,"REDEEM":3}
+byOutcome={"CREATED":1,"BASELINE":1,"REFUSED":1,"FILLED":1,
+           "NOTHING_OWED":1,"WOULD_REDEEM":1,"REDEEMED":1}
+integrity: malformed=0  seq=OK — unique
+```
+
+**13/13 live assertions PASS** (one was rewritten mid-run: the first version flagged
+any 64-hex string as a possible key, which market ids also are — the strong version
+comparing against the actual stored key is the one that counts, and it passed
+throughout).
+
+The round trip is the trust story in one file: spent **0.349912**, redeemed
+**0.458**, net **+0.108088** — with the refused order sitting alongside it, saying
+what was declined and why.
+
+### Live gaps, stated rather than glossed
+
+- **A guard BLOCK was not reproduced live this session.** The position won, so the
+  guard correctly ALLOWed. The BLOCK entry's shape is pinned offline (assertions
+  11–13) where the guard's output is controlled exactly, and the guard itself was
+  proven live in **both** directions in earlier phases. What is *not* proven live is
+  the adapter turning a real BLOCK into an entry.
+- `ZERO_PAYOUT`, `PENDING`, `NOT_FILLED` and `REVERTED` entries are offline-only for
+  the same reason — they need market conditions that cannot be summoned.
+- **Multi-process `seq`.** The counter is in-memory, initialised from the file. A
+  second process would restart it and emit duplicate `seq` values. `ts` and file order
+  stay correct, and `get_trade_log` reports a `seqIntegrity` warning rather than
+  presenting a corrupted sequence as clean. Same class of disclosure as `risk.mjs`'s
+  in-memory note.
+- **`_lastBalanceFor` scans every session file per call.** Fine at this scale,
+  O(files × entries); a real deployment would index the last-known balance.
+
+---
+
+## PHASE D VERDICT — tasks A and B
+
+**PASS on both.** The MCP surface goes from 8 tools to **9**.
+
+| Task | Built | Tested |
+|---|---|---|
+| **A.1** — 60s wording | The absolute claim was in `list_markets`' refusal and mcp-core's header comment, **not** in `parse_intent`, which was already accurate. Corrected there; `parse_intent`'s wording sharpened to "UNRELIABLE, NOT confirmed empty" naming one timing offset. Historical run scripts left alone | **PASS** — assertion 6 now fails on the absolute phrasing as well as requiring the accurate one |
+| **A.2** — runway floor | `min_seconds_to_expiry`, default 60s. Applied to **selection, not visibility**, so skipped markets are still reported. New distinct code `no_market_with_adequate_runway`, plus an unsatisfiable-by-construction case. NaN falls back rather than rejecting every market | **PASS** — **29/29** offline; **11/11** live, reproducing the bad case (T=55s with the floor off) and the clear refusal with it on |
+| **B** — trade log | `build/trade-log.mjs` + `get_trade_log`. Append-only JSONL, per session. Refusals first-class. Logging wrapped around `place_order`/`redeem` so no return path can miss it, and never able to fail the action. Sanitised session ids, `actor` splits actions from observations, one entry per redeem leg | **PASS** — **31/31** offline; **13/13** live with a full round trip (REFUSED → FILLED 0.458u → REDEEMED 0.458 tUSDC) in one log |
+
+**Regression:** 18 modules `node --check` clean; `risk-test` **28/28**; `intent-test`
+**29/29**; `trade-log-test` **31/31**; all **9 tools** advertised over the real MCP
+stdio protocol, `get_trade_log` called end to end over the wire (`total=7 returned=2
+elided=5`).
+
+**Transactions this session part (all status success):**
+
+| Purpose | Result |
+|---|---|
+| trade-log live order (`0x…9fbe`) | approve + order, **FILLED 0.458u / 0.349912 USD** |
+| trade-log live redeem (`0x…9fbe`) | **payout 0.458 tUSDC**, confirmed by balance delta |
+
+### The one thing that needs a decision, not more code
+
+**The 60s floor refuses during the last 60s of every 300s cycle — ~20% of the time —
+and there is nothing to substitute**, because the venue lists exactly one 300s market
+per asset. The floor is correct for a confirm-before-execute flow, but the demo will
+hit the refusal, so the choreography should either check timing before typing the
+instruction or narrate the refusal as the guardrail working. Lowering the floor is
+available (`min_seconds_to_expiry`) but trades away the thing it protects.
+
+### Carried forward
+
+- **`parse_intent` / `list_markets` are not in the trade log** — a deliberate
+  boundary; a `recordIntent()` adapter is a small addition if the demo wants
+  "declined before touching the chain" in the history.
+- **A live guard BLOCK through the log adapter** — offline-pinned, guard itself
+  live-proven earlier, adapter path not yet exercised on a real BLOCK.
+- **Wire generated wallets into signing.** `place_order` still signs with
+  `AGENTRAIL_OWNER_KEY`; the log records this explicitly so history cannot imply
+  otherwise.
+- **Encrypt the wallet store** — plaintext keys on disk, no recovery path.
+- **Trade log is single-process** — `seq` duplicates across processes, disclosed and
+  detected but not solved.
+- **Dollar-target undershoot** (Phase C) — re-derive quantity at placement-time price.
+- **`reverted` branch** (Phase C) — still needs an opportunistic live execution.
+- **Risk + wallet + trade-log state persistence** — all flat-file/in-memory.
+- Not started, as scoped: momentum-ladder mode.
+
+---

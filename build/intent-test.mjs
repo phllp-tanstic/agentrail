@@ -7,7 +7,8 @@
 // malformed), plus the synonym and normalization behaviours that make this a
 // normalizer rather than a pass-through.
 // ============================================================================
-import { normalizeIntent, normalizeWindowSeconds, normalizeDollarAmount } from './intent.mjs';
+import { normalizeIntent, normalizeWindowSeconds, normalizeDollarAmount,
+  normalizeMinSecondsToExpiry, DEFAULT_MIN_SECONDS_TO_EXPIRY } from './intent.mjs';
 
 let pass = 0, fail = 0;
 function check(n, name, cond, detail = '') {
@@ -45,10 +46,12 @@ check(5, '60s window is REFUSED rather than silently substituted',
   w60.ok === false && w60.reason === 'window_not_supported'
   && w60.requestedWindowSeconds === 60 && w60.nearestSupported === 300,
   `reason=${w60.reason} requested=${w60.requestedWindowSeconds} nearestSupported=${w60.nearestSupported}`);
-check(6, 'the 60s refusal states the evidence ACCURATELY (snapshot, and 60s has filled before)',
+check(6, 'the 60s refusal states the evidence ACCURATELY (unreliable, NOT confirmed empty)',
   /snapshot, not a distribution/i.test(w60.detail) && /DID fill/i.test(w60.detail)
-  && /UNRELIABLE/i.test(w60.detail),
-  'says 0/2 sampled bare at T-47s AND that runs 1-2 did fill on 60s — so "unreliable", not "always empty"');
+  && /UNRELIABLE/i.test(w60.detail) && /NOT confirmed empty/i.test(w60.detail)
+  && /ONE specific timing offset/i.test(w60.detail)
+  && !/(were|are|always)\s+empty/i.test(w60.detail),
+  'says liquidity is unreliable/not dependable, that the probe covered ONE timing offset, and that runs 1-2 DID fill on 60s — and makes no absolute emptiness claim anywhere');
 
 // ---- 4. malformed / missing fields
 const m1 = normalizeIntent({ direction: 'YES', asset: 'BTC', window_seconds: 300, targetDollarAmount: 'ten dollars' });
@@ -148,6 +151,47 @@ for (const [inp, want] of amtCases) {
 }
 check(24, 'normalizeDollarAmount handles $ / commas / unit suffixes and rejects words', aOk,
   `${amtCases.length} cases incl. "$1,000" -> 1000 and "ten" -> null`);
+
+console.log('\n=== UNIT: the runway floor (min_seconds_to_expiry) ===\n');
+
+check(25, `the default floor is ${DEFAULT_MIN_SECONDS_TO_EXPIRY}s — enough for a human to read a confirmation`,
+  normalizeMinSecondsToExpiry(undefined).value === 60
+  && normalizeMinSecondsToExpiry(undefined).wasDefaulted === true
+  && normalizeMinSecondsToExpiry(null).value === 60
+  && DEFAULT_MIN_SECONDS_TO_EXPIRY === 60,
+  'undefined / null / omitted all resolve to 60 and are flagged wasDefaulted');
+
+const runCases = [[90, 90], ['90', 90], ['90s', 90], ['2m', 120], [0, 0], [45, 45]];
+let rOk = true;
+for (const [inp, want] of runCases) {
+  const got = normalizeMinSecondsToExpiry(inp);
+  if (got.value !== want || got.warning !== null) {
+    rOk = false; console.log(`      runway MISMATCH ${JSON.stringify(inp)} -> ${got.value} (warning=${got.warning}), wanted ${want} with no warning`);
+  }
+}
+check(26, 'an explicit floor is honoured across number and duration-string forms', rOk,
+  `${runCases.length} cases: 90 | "90" | "90s" | "2m" -> 120 | 0 (floor disabled) | 45`);
+
+const nanFloor = normalizeMinSecondsToExpiry('soon');
+check(27, 'a NON-FINITE floor falls back to the default instead of being passed through',
+  nanFloor.value === 60 && nanFloor.wasDefaulted === true
+  && /every comparison against NaN is false/i.test(nanFloor.warning ?? ''),
+  'this is the Task-0 NaN defect reached from a different input: `secondsToExpiry >= NaN` is always false, so passing it through would reject EVERY market and refuse with a cause that was not the real one');
+
+const negFloor = normalizeMinSecondsToExpiry(-30);
+check(28, 'a NEGATIVE floor is normalized to 0 with a warning that the protection is off',
+  negFloor.value === 0 && /NO runway floor/i.test(negFloor.warning ?? '')
+  && /disables the protection/i.test(negFloor.warning ?? ''),
+  'meaningless rather than unsafe (every market clears it), so normalized rather than refused — but the warning says the floor is gone');
+
+check(29, 'the floor is NOT a place_order argument and never leaks into placeOrderArgs',
+  (() => {
+    const r = normalizeIntent({ direction: 'YES', asset: 'BTC', window_seconds: 300,
+      targetDollarAmount: 2, min_seconds_to_expiry: 120 });
+    return r.ok === true && r.placeOrderArgs.min_seconds_to_expiry === undefined
+      && r.placeOrderArgs.minSecondsToExpiry === undefined;
+  })(),
+  'it governs market SELECTION inside parse_intent; place_order takes a resolved market_id and has no use for it');
 
 console.log(`\n=== RESULT: ${pass}/${pass + fail} PASS${fail ? `, ${fail} FAIL` : ''} ===`);
 process.exit(fail ? 1 : 0);

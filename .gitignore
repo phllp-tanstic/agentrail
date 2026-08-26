@@ -7,3 +7,9 @@ node_modules/
 .wallet-store.json
 build/.wallet-store.json
 *.wallet-store.json
+
+# Trade log — a user's real trading history (addresses, sizes, fills, payouts).
+# No key material, but it is per-user activity data and does not belong in git.
+.trade-log/
+build/.trade-log/
+*.jsonl

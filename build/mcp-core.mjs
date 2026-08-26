@@ -30,6 +30,10 @@ import { redeemGuard } from './redeem-guard.mjs';
 import { snapPriceToTick, isOnTick, exactToRaw } from './tick-snap.mjs';
 import { checkPreOrder, commitReservation, releaseReservation, recordSpend,
   recordPayout, riskSnapshot, RISK_CONFIG } from './risk.mjs';
+// Re-exported below as tools; also needed as a local binding, which `export ... from`
+// does not create.
+import { list_wallets as walletList } from './wallet.mjs';
+import { normalizeIntent as normalizeIntentLocal } from './intent.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -46,6 +50,45 @@ const COLL_DEC = 6;                                                 // tUSDC on 
 // Scope fences, enforced not documented.
 export const ALLOWED_DIRECTIONS = ['YES'];
 export const ALLOWED_WINDOWS = [300];
+
+// Defence-in-depth ceiling on maxSlippagePct. This parameter stays
+// caller-adjustable by design — unlike the risk caps in ./risk.mjs, which are
+// env-only because they bound total exposure. Slippage tolerance is a per-order
+// execution preference, like a limit price. The ceiling exists so an ABSURD value
+// cannot silently disable a protection the caller still believes is active.
+// A request above it is CLAMPED, not rejected: refusing would turn a harmless
+// overshoot into a failed trade.
+//
+// The FLOOR is deliberately not clamped. A negative value makes the guard refuse
+// unconditionally, which fails CLOSED (refuses orders rather than placing
+// unprotected ones) and is how Phase C exercised the refusal branch.
+export const SLIPPAGE_PCT_CEILING = 50;
+
+/**
+ * Resolve the effective maxSlippagePct, reporting any adjustment.
+ *
+ * Handles two distinct unsafe inputs:
+ *   - above the ceiling      -> clamped down
+ *   - NOT A FINITE NUMBER    -> falls back to the default. This one matters more
+ *     than it looks: the guard is `slippagePct > maxSlippagePct`, and EVERY
+ *     comparison against NaN is false, so a non-numeric value silently removed
+ *     the slippage guard entirely and broadcast with no protection.
+ */
+export function resolveMaxSlippagePct(raw, { defaultPct = 5 } = {}) {
+  const requested = Number(raw);
+  if (!Number.isFinite(requested)) {
+    return { maxSlippagePct: defaultPct, requestedMaxSlippagePct: raw ?? null,
+      clamped: false, nonFiniteFallback: true,
+      clampNote: `maxSlippagePct=${JSON.stringify(raw)} is not a finite number. Fell back to the default of ${defaultPct}%. This is NOT cosmetic: the guard is a single \`>\` comparison and every comparison against NaN is false, so a non-numeric value would have silently disabled slippage protection entirely rather than erroring.` };
+  }
+  if (requested > SLIPPAGE_PCT_CEILING) {
+    return { maxSlippagePct: SLIPPAGE_PCT_CEILING, requestedMaxSlippagePct: requested,
+      clamped: true, nonFiniteFallback: false,
+      clampNote: `requested ${requested}% exceeded the server-side ceiling of ${SLIPPAGE_PCT_CEILING}% and was clamped down. The order was NOT refused — it proceeds under the ceiling. This ceiling is defence-in-depth against an absurd value silently disabling slippage protection; it is not a risk cap, and moderate values are honoured as given.` };
+  }
+  return { maxSlippagePct: requested, requestedMaxSlippagePct: requested,
+    clamped: false, nonFiniteFallback: false, clampNote: null };
+}
 
 // ------------------------------------------------------------------ helpers
 const __dir = path.dirname(fileURLToPath(import.meta.url));
@@ -204,7 +247,8 @@ export async function place_order(input = {}) {
   // Accept both the camelCase names Phase C specified and snake_case matching the
   // existing tool surface, so either spelling works from any caller.
   const targetDollarAmount = input.targetDollarAmount ?? input.target_dollar_amount ?? null;
-  const maxSlippagePct = Number(input.maxSlippagePct ?? input.max_slippage_pct ?? 5);
+  const SLIP = resolveMaxSlippagePct(input.maxSlippagePct ?? input.max_slippage_pct ?? 5);
+  const maxSlippagePct = SLIP.maxSlippagePct;
   const stakeUnitsIn = input.stake_units ?? input.stakeUnits ?? null;
 
   const dir = String(direction).toUpperCase();
@@ -429,6 +473,10 @@ export async function place_order(input = {}) {
     AT.slippage = {
       referencePrice: String(referencePrice), placementPrice: String(placementPrice),
       slippagePct: Number(slippagePct.toFixed(4)), maxSlippagePct,
+      requestedMaxSlippagePct: SLIP.requestedMaxSlippagePct,
+      clamped: SLIP.clamped, ...(SLIP.nonFiniteFallback ? { nonFiniteFallback: true } : {}),
+      ...(SLIP.clampNote ? { clampNote: SLIP.clampNote } : {}),
+      ceiling: SLIPPAGE_PCT_CEILING,
       estimatedSpendAtPlacementPriceUsd: toUsd((placementPrice * QTY) / ONE),
       enforced: sizingMode === 'DOLLAR',
       basis: 'adverse movement of the best ask between the reference read (used for sizing) and the read immediately before broadcast. The deliberate cross_ticks premium is NOT counted as slippage — it is intended, and is reported separately as worstCaseAtOurLimitUsd.' };
@@ -790,3 +838,192 @@ export async function redeem({ market_id = null, dry_run = false } = {}) {
       totalPayoutUnits: R.redeemed.reduce((a, e) => a + Number(e.payout?.payoutUnits ?? 0), 0).toFixed(6) } };
 }
 const stripM = ({ m, ...rest }) => ({ ...rest, amount: String(rest.amount) });
+
+// ============================================================================
+// TOOL 5 — generate_wallet  (re-exported from ./wallet.mjs, no chain access)
+// TOOL 6 — get_wallet_balance
+//
+// Purpose-only dedicated wallets, per spec §2's custody model. See the header of
+// build/wallet.mjs for the custody and storage disclosures — this is a CUSTODIAL
+// model over the generated wallet and is deliberately NOT described otherwise.
+// ============================================================================
+export { generate_wallet, list_wallets, STORE_PATH } from './wallet.mjs';
+
+const SOMI_DEC = 18;   // native gas token
+
+/**
+ * tUSDC + native SOMI balance for a generated (or any) address, so a caller can
+ * confirm a deposit landed BEFORE trying to trade. Read-only: needs no key.
+ *
+ * Accepts either a `session_id` (resolved through the wallet store) or a raw
+ * `address`. An address that is not in the store is still reported — these are
+ * public reads — but flagged `known: false` so a caller cannot mistake an
+ * arbitrary address for one AgentRail can sign for.
+ */
+export async function get_wallet_balance({ session_id = null, address = null } = {}) {
+  if (!session_id && !address) {
+    return { ok: false, refused: true, reason: 'session_id_or_address_required',
+      detail: 'Pass either session_id (resolved through the wallet store) or a raw address.' };
+  }
+
+  let resolved = address, known = false, record = null;
+  if (session_id) {
+    const hit = walletList().wallets.find((w) => w.sessionId === String(session_id).trim());
+    if (!hit) {
+      return { ok: false, refused: true, reason: 'session_not_found',
+        detail: `no wallet is stored for session_id="${session_id}". Call generate_wallet first.` };
+    }
+    if (address && address.toLowerCase() !== hit.address.toLowerCase()) {
+      return { ok: false, refused: true, reason: 'session_address_mismatch',
+        detail: `session_id="${session_id}" maps to ${hit.address}, which is not the address ${address} that was also supplied. Refusing rather than guessing which one was meant.` };
+    }
+    resolved = hit.address; known = true; record = hit;
+  } else {
+    const hit = walletList().wallets.find(
+      (w) => w.address.toLowerCase() === String(address).trim().toLowerCase());
+    if (hit) { known = true; record = hit; }
+  }
+
+  if (!/^0x[0-9a-fA-F]{40}$/.test(String(resolved))) {
+    return { ok: false, refused: true, reason: 'invalid_address',
+      detail: `"${resolved}" is not a 20-byte hex address.` };
+  }
+
+  const { pc } = ctx();                                  // read-only, no key needed
+  const [somiRaw, usdcRaw] = await Promise.all([
+    pc.getBalance({ address: resolved }),
+    pc.readContract({ address: COLL, abi: erc20Abi, functionName: 'balanceOf', args: [resolved] }),
+  ]);
+
+  const tusdc = Number(formatUnits(usdcRaw, COLL_DEC));
+  const somi = Number(formatUnits(somiRaw, SOMI_DEC));
+
+  // Both are required to trade, for different reasons, so report them separately
+  // rather than as one "funded" boolean.
+  const canPayGas = somiRaw > 0n;
+  const hasCollateral = usdcRaw > 0n;
+
+  return { ok: true,
+    address: resolved, known,
+    ...(record ? { sessionId: record.sessionId, createdAt: record.createdAt, label: record.label } : {}),
+    ...(known ? {} : { unknownNote: 'This address is NOT in the wallet store. Balances are public reads so they are still reported, but AgentRail holds no key for it and cannot sign on its behalf.' }),
+    balances: {
+      tUSDC: { formatted: formatUnits(usdcRaw, COLL_DEC), raw: String(usdcRaw), decimals: COLL_DEC,
+        token: COLL, purpose: 'collateral — this is what orders spend' },
+      SOMI: { formatted: formatUnits(somiRaw, SOMI_DEC), raw: String(somiRaw), decimals: SOMI_DEC,
+        purpose: 'native gas — needed to broadcast, separate from collateral' },
+    },
+    readiness: {
+      hasCollateral, canPayGas,
+      readyToTrade: hasCollateral && canPayGas,
+      blockedBy: hasCollateral && canPayGas ? null
+        : [...(hasCollateral ? [] : ['no tUSDC collateral']), ...(canPayGas ? [] : ['no SOMI for gas'])],
+      note: 'tUSDC and SOMI are BOTH required and are not interchangeable: tUSDC is the collateral an order spends, SOMI pays gas to broadcast it. A wallet with collateral but no SOMI cannot place an order at all.',
+    },
+    confirmedBy: 'direct on-chain reads (eth_getBalance + ERC20 balanceOf) at call time — not an indexer, so a deposit shows as soon as it is mined',
+  };
+}
+
+// ============================================================================
+// TOOL 7 — parse_intent
+//
+// Validate + normalize ALREADY-EXTRACTED structured intent into place_order args,
+// and refuse anything unsupported before it can reach the chain.
+//
+// THIS DOES NOT CALL AN LLM and does not do natural-language understanding — the
+// calling agent extracts the fields from the user's sentence, and this validates
+// them. That boundary is the point: it keeps the validation layer deterministic
+// and offline-testable. Pure logic lives in ./intent.mjs; this adds the one thing
+// that needs the chain (resolving asset -> a live market_id) plus the
+// confirm-before-execute summary spec §2 calls for.
+//
+// IT PLACES NOTHING. It returns `placeOrderArgs` for the caller to pass to
+// place_order after the user confirms.
+// ============================================================================
+export { normalizeIntent, SUPPORTED_ASSETS } from './intent.mjs';
+
+export async function parse_intent(input = {}) {
+  const norm = normalizeIntentLocal(input);
+  if (!norm.ok) return { tool: 'parse_intent', ...norm };
+
+  const R = { ok: true, tool: 'parse_intent', ...norm,
+    placedAnything: false,
+    contract: 'This tool VALIDATES and NORMALIZES intent. It does not place an order. Pass `placeOrderArgs` to place_order after the user confirms.' };
+
+  if (input.resolve_market === false) {
+    return { ...R, marketResolution: { attempted: false,
+      note: 'resolve_market:false — market_id was NOT resolved. placeOrderArgs is incomplete: add a market_id from list_markets before calling place_order.' } };
+  }
+
+  // --- resolve asset -> a live, gated, liquid market of the right window
+  const lm = await list_markets({ window_seconds: norm.normalized.windowSeconds });
+  if (!lm.ok) {
+    return { ...R, marketResolution: { attempted: true, resolved: false,
+      note: `list_markets refused: ${lm.reason}` } };
+  }
+  const candidates = lm.markets.filter(
+    (m) => String(m.asset).toUpperCase().includes(norm.normalized.asset));
+
+  if (!candidates.length) {
+    return { ok: false, refused: true, tool: 'parse_intent',
+      reason: 'no_tradeable_market',
+      detail: `intent is valid, but no tradeable ${norm.normalized.asset} market is available on a ${norm.normalized.windowSeconds}s window right now. list_markets saw ${lm.liveMarketsSeen} live markets and found ${lm.tradeable} tradeable across all assets. This is a transient market-availability condition, not an invalid request — the same intent may succeed shortly.`,
+      normalized: norm.normalized,
+      marketResolution: { attempted: true, resolved: false,
+        assetsAvailable: [...new Set(lm.markets.map((m) => m.asset))],
+        listMarketsSkipped: lm.skipped },
+      suggestion: 'Retry in the next window, or re-issue for an asset in assetsAvailable.' };
+  }
+
+  // Soonest settlement first, matching list_markets' own ordering.
+  const M = candidates[0];
+  R.placeOrderArgs = { market_id: M.marketId, ...R.placeOrderArgs };
+  R.marketResolution = { attempted: true, resolved: true,
+    marketId: M.marketId, asset: M.asset, pool: M.pool,
+    secondsToExpiry: M.secondsToExpiry, statusGate: M.statusGate,
+    bestYesAskProb: M.bestYesAskProb, yesAskDepthUnits: M.yesAskDepthUnits,
+    otherCandidates: candidates.slice(1).map((c) => ({ marketId: c.marketId, secondsToExpiry: c.secondsToExpiry })),
+    selectedBy: 'soonest settlement among tradeable markets for this asset (list_markets ordering)' };
+
+  // --- confirm-before-execute summary (spec §2: show stake/direction/window/payout)
+  const ask = M.bestYesAskProb === null ? null : Number(M.bestYesAskProb);
+  let economics = null;
+
+  if (ask !== null && ask > 0) {
+    // A binary outcome token pays 1.00 collateral per unit if it wins, 0 if not.
+    // So units = cash / price, and max payout = units x 1.00.
+    const cash = norm.normalized.mode === 'DOLLAR' ? norm.normalized.targetDollarAmount : null;
+    const units = cash !== null ? cash / ask : norm.normalized.stake_units;
+    const costAtAsk = units * ask;
+    const maxPayout = units * 1.0;
+    economics = {
+      basis: `best resting YES ask = ${ask} (implied probability ${(ask * 100).toFixed(2)}%)`,
+      estimatedUnits: Number(units.toFixed(6)),
+      estimatedCostAtAskUsd: Number(costAtAsk.toFixed(6)),
+      maxPayoutIfYesWinsUsd: Number(maxPayout.toFixed(6)),
+      estimatedProfitIfYesWinsUsd: Number((maxPayout - costAtAsk).toFixed(6)),
+      lossIfYesLosesUsd: Number(costAtAsk.toFixed(6)),
+      payoutMultiple: Number((1 / ask).toFixed(4)),
+      caveats: [
+        'ESTIMATE ONLY, at the current best ask. place_order bids cross_ticks (default 20) ABOVE the ask to cross the spread, so the real cost is higher than estimatedCostAtAskUsd — worst case is quantity x our own limit price, which place_order reports as spendEstimate.worstCaseAtOurLimitUsd.',
+        'Quantity is rounded to the minQuantity grid, so units will shift slightly.',
+        'The book moves. This venue was observed moving 83% between two reads seconds apart, so treat these numbers as indicative of the current book, not a quote.',
+        'A binary outcome token pays exactly 1.00 collateral per unit if it wins and 0 if it loses — maxPayoutIfYesWinsUsd already accounts for that and is not leveraged.',
+      ],
+    };
+  }
+
+  R.confirmation = {
+    summary: norm.normalized.mode === 'DOLLAR'
+      ? `Buy $${norm.normalized.targetDollarAmount} of ${norm.normalized.asset} ${norm.normalized.direction} on a ${norm.normalized.windowSeconds}s window settling in ${M.secondsToExpiry}s.`
+      : `Buy ${norm.normalized.stake_units} units of ${norm.normalized.asset} ${norm.normalized.direction} on a ${norm.normalized.windowSeconds}s window settling in ${M.secondsToExpiry}s.`,
+    direction: norm.normalized.direction, asset: norm.normalized.asset,
+    windowSeconds: norm.normalized.windowSeconds, settlesInSeconds: M.secondsToExpiry,
+    economics,
+    riskLimits: { maxStakePerWindowUsd: RISK_CONFIG.maxStakePerWindowUsd,
+      maxDailyLossUsd: RISK_CONFIG.maxDailyLossUsd,
+      note: 'Enforced server-side before any broadcast and NOT adjustable by a caller. An order above these is refused by place_order, not trimmed.' },
+    showThisToTheUserBeforeCalling: 'place_order',
+  };
+  return R;
+}

@@ -1,3 +1,9 @@
 .env
 node_modules/
 .scratch/
+
+# Generated dedicated-wallet store — CONTAINS PRIVATE KEYS IN PLAINTEXT.
+# Never commit. Losing this file loses access to any funds in those wallets.
+.wallet-store.json
+build/.wallet-store.json
+*.wallet-store.json

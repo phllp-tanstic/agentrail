@@ -57,7 +57,7 @@ server.registerTool('place_order', {
     targetDollarAmount: z.number().optional()
       .describe('Sizing mode B: target CASH to spend, in USD (tUSDC). Quantity is derived as targetDollarAmount / current best ask, rounded to the minQuantity grid. Actual spend is reported as fill.collateralSpent alongside dollarSizing.varianceUsd — do not assume the target is hit exactly. Mutually exclusive with stake_units.'),
     maxSlippagePct: z.number().default(5)
-      .describe('Only enforced with targetDollarAmount. If the best ask moves adversely by more than this percentage between the read used for sizing and the read immediately before broadcast, the order is refused with reason "slippage_exceeded" rather than placed. The deliberate cross_ticks premium is not counted as slippage.'),
+      .describe('Only enforced with targetDollarAmount. If the best ask moves adversely by more than this percentage between the read used for sizing and the read immediately before broadcast, the order is refused with reason "slippage_exceeded" rather than placed. The deliberate cross_ticks premium is not counted as slippage. CLAMPED server-side to a 50% ceiling — a higher value is reduced to 50 and reported as slippage.clamped, NOT rejected. A non-numeric value falls back to 5 rather than silently disabling the guard.'),
     cross_ticks: z.number().int().default(20)
       .describe('How many ticks above the best resting ask to bid. 20 is the value that filled in the Phase A proof.'),
     window_seconds: z.number().int().default(300)
@@ -81,5 +81,54 @@ server.registerTool('redeem', {
       .describe('Run discovery and the guard, report what would happen, broadcast nothing.'),
   },
 }, wrap(core.redeem));
+
+server.registerTool('generate_wallet', {
+  title: 'Create a purpose-only dedicated wallet for a session',
+  description: `Generates a fresh keypair for a session and returns ONLY the address — the private key is never returned to the caller and stays server-side. Per the spec's custody model, a user funds this purpose-only wallet with what they intend to trade instead of exposing a main wallet, so the blast radius is bounded by the deposit. IDEMPOTENT: calling twice for the same session_id returns the FIRST wallet with created:false rather than generating a second one, because rotating an address that may already hold a deposit would strand those funds. CUSTODY, stated plainly: this is a CUSTODIAL model — AgentRail holds the key and CAN move these funds. That is a DIFFERENT model from the operator-delegation design, where the operator key is scoped on-chain and architecturally cannot move funds; do not describe this wallet as non-custodial. Keys are plaintext JSON on local disk with no encryption and no recovery path. NOTE: place_order does not yet sign with this wallet — routing execution through it is separate, unimplemented work.`,
+  inputSchema: {
+    session_id: z.string().describe('Identifier the wallet is stored under and looked up by later. Required, non-empty.'),
+    label: z.string().optional().describe('Optional human-readable note stored alongside the address.'),
+    force_new: z.boolean().default(false)
+      .describe('Generate a replacement keypair even though one exists for this session_id. The previous record is retained server-side under a suffixed key rather than deleted, but is no longer reachable by this session_id. Only pass true if you accept that.'),
+  },
+}, wrap(core.generate_wallet));
+
+server.registerTool('get_wallet_balance', {
+  title: 'Check tUSDC and SOMI balance for a wallet',
+  description: `Direct on-chain reads (eth_getBalance + ERC20 balanceOf) of a generated wallet's collateral and gas balances, so a caller can confirm a deposit landed BEFORE attempting to trade. Not an indexer read, so a deposit appears as soon as it is mined. Accepts either session_id (resolved through the wallet store) or a raw address; an address not in the store is still reported, since these are public reads, but flagged known:false because AgentRail holds no key for it. Reports tUSDC and SOMI SEPARATELY and does not collapse them into one "funded" flag: tUSDC is the collateral an order spends and SOMI pays the gas to broadcast it, so a wallet holding collateral but no SOMI cannot place an order at all.`,
+  inputSchema: {
+    session_id: z.string().optional().describe('Session whose wallet to check. Either this or address is required.'),
+    address: z.string().optional().describe('Raw 0x address to check. Either this or session_id is required.'),
+  },
+}, wrap(core.get_wallet_balance));
+
+server.registerTool('list_wallets', {
+  title: 'List known dedicated wallets (addresses only)',
+  description: 'Every session/address pair in the wallet store. Addresses and metadata only — private keys are never returned by any tool.',
+  inputSchema: {},
+}, wrap(core.list_wallets));
+
+server.registerTool('parse_intent', {
+  title: 'Validate and normalize a trading intent into place_order arguments',
+  description: `Takes ALREADY-EXTRACTED structured intent and returns exactly what place_order needs, refusing anything unsupported before it can reach the chain. THIS TOOL DOES NOT DO NATURAL-LANGUAGE UNDERSTANDING and does not call an LLM — YOU (the calling agent) read the user's sentence and extract direction/asset/window/amount; this validates and normalizes them deterministically. It accepts synonyms (up/long -> YES, bitcoin -> BTC, "5m" -> 300, "$10" -> 10), resolves the asset to a live gated market with real YES depth, and returns a \`confirmation\` block with estimated units, cost, max payout and payout multiple to show the user BEFORE executing. IT PLACES NOTHING — pass the returned \`placeOrderArgs\` to place_order after the user confirms. Refusals use stable machine codes in \`reason\`: direction_not_supported (NO side — never filled at any expressible price, cause undetermined), window_not_supported (only 300s is proven), asset_not_supported, ambiguous_sizing, sizing_required, invalid_target_dollar_amount, no_tradeable_market (transient, not invalid). ${SCOPE}`,
+  inputSchema: {
+    direction: z.string().optional()
+      .describe('Direction the user wants, as extracted. Synonyms accepted: YES/up/long/higher/bullish -> YES; NO/down/short/lower/bearish -> NO (refused, with the documented reason).'),
+    asset: z.string().optional()
+      .describe('Asset as extracted. Accepts BTC/bitcoin/XBT and ETH/ether/ethereum. Only BTC and ETH are in scope.'),
+    window_seconds: z.union([z.number(), z.string()]).optional()
+      .describe('Settlement window. Accepts 300, "300s", "5m", "5 minutes". Only 300s is in proven scope; anything else is refused rather than substituted.'),
+    targetDollarAmount: z.union([z.number(), z.string()]).optional()
+      .describe('Cash to spend. Accepts 10, "10", "$10", "10 USD". Mutually exclusive with stake_units.'),
+    stake_units: z.union([z.number(), z.string()]).optional()
+      .describe('Raw outcome-token quantity, NOT a cash amount. Mutually exclusive with targetDollarAmount.'),
+    maxSlippagePct: z.number().optional().describe('Passed through to place_order. Clamped there to a 50% ceiling.'),
+    cross_ticks: z.number().int().optional().describe('Passed through to place_order. Defaults to the proven 20 if omitted.'),
+    resolve_market: z.boolean().default(true)
+      .describe('Resolve the asset to a live market_id (needs a market read). Set false to validate the intent only, offline; placeOrderArgs is then incomplete.'),
+    raw_text: z.string().optional()
+      .describe('The user\'s original sentence. Echoed back for audit ONLY — it is never parsed by this tool.'),
+  },
+}, wrap(core.parse_intent));
 
 await server.connect(new StdioServerTransport());

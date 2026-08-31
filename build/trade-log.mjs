@@ -343,8 +343,8 @@ export function recordWallet({ session_id = null, res = null, forceNew = false }
     address: res.address, custodyModel: 'CUSTODIAL — AgentRail holds the private key',
     privateKeyReturned: false, forceNew: !!forceNew,
     ...(res.replacedPrevious ? { replacedPrevious: res.replacedPrevious.address } : {}),
-    signingWiredUp: false,
-    signingNote: 'place_order does NOT yet sign with this wallet — it signs with AGENTRAIL_OWNER_KEY. Logged so the history cannot imply an end-to-end custody switch that does not exist.' });
+    signingWiredUp: true,
+    signingNote: 'place_order, redeem, and withdraw all sign with THIS wallet\'s own key for this session_id — not a shared owner key. Logged so the history reflects the actual custody model in effect at creation time.' });
 }
 
 /**

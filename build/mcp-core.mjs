@@ -1032,7 +1032,18 @@ async function withdraw_inner({ session_id = null, to_address = null, asset = nu
     toAddress: to_address, asset: ASSET === 'TUSDC' ? 'tUSDC' : 'SOMI', tx: {},
     custody: CUSTODY_DISCLOSURE };
 
-  const gasPrice = await pc.getGasPrice();
+  // Gas reservation uses maxFeePerGas, not a flat legacy gasPrice. This chain's
+  // actual broadcasts are EIP-1559 type-2 transactions (confirmed on-chain via
+  // block explorer — the tx type prefix is 0x02), where the real per-gas-unit
+  // cost is governed by base fee + priority fee, capped at maxFeePerGas. Sizing
+  // the reservation off a flat getGasPrice() figure can mismatch what viem's
+  // auto-filled EIP-1559 fields actually commit to. maxFeePerGas is the correct
+  // conservative ceiling: reserving against it can leave a little unspent gas
+  // headroom (harmless — same fail-closed bias as the risk ledger elsewhere in
+  // this codebase) but cannot under-reserve and fail to broadcast, which is the
+  // failure mode that matters for a "max" withdrawal.
+  const fees = await pc.estimateFeesPerGas().catch(() => null);
+  const gasPrice = fees?.maxFeePerGas ?? await pc.getGasPrice(); // legacy-chain fallback only
 
   // ---------------------------------------------------------------- SOMI
   if (ASSET === 'SOMI') {
@@ -1046,7 +1057,7 @@ async function withdraw_inner({ session_id = null, to_address = null, asset = nu
       sendRaw = balBefore - gasCost;
       if (sendRaw <= 0n) {
         return { ok: false, ...R, reason: 'insufficient_balance_for_gas',
-          detail: `SOMI balance ${formatUnits(balBefore, 18)} is not enough to cover the estimated gas cost (${formatUnits(gasCost, 18)} SOMI) of the withdrawal transaction itself. Nothing to withdraw after reserving gas.` };
+          detail: `SOMI balance ${formatUnits(balBefore, 18)} is not enough to cover the estimated gas cost (${formatUnits(gasCost, 18)} SOMI, at maxFeePerGas ${formatUnits(gasPrice, 9)} gwei) of the withdrawal transaction itself. Nothing to withdraw after reserving gas.` };
       }
     } else {
       sendRaw = parseUnits(String(amount), 18);
@@ -1071,18 +1082,10 @@ async function withdraw_inner({ session_id = null, to_address = null, asset = nu
 
   // ---------------------------------------------------------------- tUSDC
   // ERC20 transfer needs SOMI for gas — checked up front, not discovered by a
-  // failed broadcast, same discipline get_wallet_balance already uses.
-  const somiBal = await pc.getBalance({ address: owner.address });
-  // Conservative estimate for a plain ERC20 transfer on this chain; refined by
-  // an actual simulation would be better but transfer() on a standard ERC20
-  // has no branch-dependent gas cost worth simulating for a refusal check.
-  const gasEstimate = 65000n;
-  const gasCost = gasEstimate * gasPrice;
-  if (somiBal < gasCost) {
-    return { ok: false, ...R, reason: 'insufficient_gas',
-      detail: `This wallet holds ${formatUnits(somiBal, 18)} SOMI, below the estimated ${formatUnits(gasCost, 18)} SOMI needed to broadcast the withdrawal transaction. tUSDC cannot pay for its own transfer's gas — fund this wallet with SOMI first.` };
-  }
-
+  // failed broadcast, same discipline get_wallet_balance already uses. Gas is
+  // a REAL estimateGas() call against the actual transfer(to, amount) call,
+  // not a hardcoded guess — matches the SOMI branch's methodology and this
+  // codebase's general "measure, don't assume" discipline.
   const collBefore = await pc.readContract(
     { address: COLL, abi: erc20Abi, functionName: 'balanceOf', args: [owner.address] });
   let sendRaw;
@@ -1101,6 +1104,15 @@ async function withdraw_inner({ session_id = null, to_address = null, asset = nu
   }
 
   const data = encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [to_address, sendRaw] });
+  const somiBal = await pc.getBalance({ address: owner.address });
+  const gasEstimate = await pc.estimateGas(
+    { account: owner.address, to: COLL, data }).catch(() => 65000n); // fallback only if estimation itself fails
+  const gasCost = gasEstimate * gasPrice;
+  if (somiBal < gasCost) {
+    return { ok: false, ...R, reason: 'insufficient_gas',
+      detail: `This wallet holds ${formatUnits(somiBal, 18)} SOMI, below the estimated ${formatUnits(gasCost, 18)} SOMI needed to broadcast this specific withdrawal transaction (at maxFeePerGas ${formatUnits(gasPrice, 9)} gwei). tUSDC cannot pay for its own transfer's gas — fund this wallet with SOMI first.` };
+  }
+
   await send(session_id, R.tx, 'withdraw_tUSDC', { to: COLL, data });
   const collAfter = await pc.readContract(
     { address: COLL, abi: erc20Abi, functionName: 'balanceOf', args: [owner.address] });
@@ -1210,7 +1222,24 @@ export async function get_wallet_balance({ session_id = null, address = null } =
 
   // Both are required to trade, for different reasons, so report them separately
   // rather than as one "funded" boolean.
-  const canPayGas = somiRaw > 0n;
+  //
+  // canPayGas is a REAL floor, not "greater than zero." A wallet can hold
+  // dust-level SOMI (e.g. 0.0000252, observed live in this session after a
+  // withdraw drained it) that is nonzero but nowhere near enough to broadcast
+  // anything — the previous `somiRaw > 0n` check reported that wallet as
+  // "ready," which was false. GAS_FLOOR_UNITS is sized off this session's own
+  // real gasUsed figures: a single order placement or redemption leg (once
+  // approved) runs ~470-490k gas; setting the floor there means "can plausibly
+  // attempt ONE typical operation," not a guarantee for every operation
+  // (a first-time approval adds ~260k more, and this floor does not budget for
+  // that). This is a readiness SIGNAL for the caller to act on before trying,
+  // not a gate — the tools themselves (withdraw, place_order) run their own
+  // real estimateGas() against the specific call before ever broadcasting.
+  const GAS_FLOOR_UNITS = 300_000n;
+  const fees = await pc.estimateFeesPerGas().catch(() => null);
+  const gasPriceForFloor = fees?.maxFeePerGas ?? await pc.getGasPrice().catch(() => 0n);
+  const minSomiForGasRaw = GAS_FLOOR_UNITS * gasPriceForFloor;
+  const canPayGas = somiRaw >= minSomiForGasRaw;
   const hasCollateral = usdcRaw > 0n;
 
   // --- DEPOSIT LOGGING, by observation. AgentRail has no deposit tool by design
@@ -1241,8 +1270,10 @@ export async function get_wallet_balance({ session_id = null, address = null } =
       hasCollateral, canPayGas,
       readyToTrade: hasCollateral && canPayGas,
       blockedBy: hasCollateral && canPayGas ? null
-        : [...(hasCollateral ? [] : ['no tUSDC collateral']), ...(canPayGas ? [] : ['no SOMI for gas'])],
-      note: 'tUSDC and SOMI are BOTH required and are not interchangeable: tUSDC is the collateral an order spends, SOMI pays gas to broadcast it. A wallet with collateral but no SOMI cannot place an order at all.',
+        : [...(hasCollateral ? [] : ['no tUSDC collateral']), ...(canPayGas ? [] : ['SOMI balance below the estimated gas floor for one typical operation'])],
+      gasFloor: { estimatedMinSomi: formatUnits(minSomiForGasRaw, SOMI_DEC),
+        basis: `${GAS_FLOOR_UNITS} gas units × current maxFeePerGas — sized off this session's own observed order/redeem gas costs (~470-490k once already approved); does not budget for a first-time approval, which adds ~260k more` },
+      note: 'tUSDC and SOMI are BOTH required and are not interchangeable: tUSDC is the collateral an order spends, SOMI pays gas to broadcast it. canPayGas checks against a real gas-cost floor, not merely a nonzero balance — this is a readiness signal, not a guarantee; each tool re-checks gas against its own actual call before broadcasting.',
     },
     confirmedBy: 'direct on-chain reads (eth_getBalance + ERC20 balanceOf) at call time — not an indexer, so a deposit shows as soon as it is mined',
   };

@@ -288,6 +288,44 @@ export function recordRedeem({ session_id = null, res = null, dry_run = false, t
   return out;
 }
 
+/**
+ * withdraw — one entry per attempt, success or refusal or throw. Modelled on
+ * recordOrder's shape (single-transaction tool, unlike redeem's per-leg log):
+ * a refused withdrawal (insufficient balance, invalid address, session gate)
+ * is logged exactly as prominently as a completed one, for the same trust
+ * reason every refusal in this file is first-class — "no way to get money
+ * back out" was the single biggest gap in the roadmap, so its log line
+ * carries the same weight as the transfer itself.
+ */
+export function recordWithdrawal({ session_id = null, input = {}, res = null, thrown = null }) {
+  const asset = input.asset ?? res?.asset ?? 'unknown';
+  const to = input.to_address ?? input.toAddress ?? res?.toAddress ?? null;
+  const amountAsked = input.amount ?? 'max';
+
+  if (thrown) {
+    return logEvent({ session_id, kind: 'WITHDRAWAL', event: 'WITHDRAW', outcome: 'ERROR', ok: false,
+      summary: `ERROR — withdraw threw before producing a result: ${thrown}. Requested ${amountAsked} ${asset} to ${shortId(to)}. Whether anything broadcast is UNKNOWN from this entry alone — check get_wallet_balance for the session's wallet.`,
+      why: thrown, asset, toAddress: to, unresolved: true });
+  }
+
+  if (!res?.ok) {
+    const refused = res?.refused === true;
+    return logEvent({ session_id, kind: 'WITHDRAWAL', event: 'WITHDRAW',
+      outcome: refused ? 'REFUSED' : 'FAILED', ok: false,
+      summary: `${refused ? 'REFUSED' : 'FAILED'} (${res?.reason ?? 'unknown'}) — requested ${amountAsked} ${asset} to ${shortId(to)}. ${refused ? 'Nothing was broadcast.' : 'A transaction may have been attempted — check the chain before assuming nothing moved.'}`,
+      why: res?.detail ?? res?.reason ?? 'no detail given',
+      reason: res?.reason ?? null, asset, toAddress: to,
+      ...(res?.tx && Object.keys(res.tx).length ? { tx: res.tx } : {}) });
+  }
+
+  return logEvent({ session_id, kind: 'WITHDRAWAL', event: 'WITHDRAW', outcome: 'SENT', ok: true,
+    summary: `SENT — withdrew ${res.amountSent} ${asset} from the session's dedicated wallet to ${shortId(res.toAddress)}, confirmed by balance delta (tx ${shortId(res.tx?.hash)}).`,
+    asset, amountSent: res.amountSent, toAddress: res.toAddress,
+    fromAddress: res.fromAddress ?? null,
+    confirmedBy: 'balance delta + transaction receipt status',
+    tx: res.tx ?? {} });
+}
+
 /** generate_wallet — creation, and the idempotent no-op, which is also a fact. */
 export function recordWallet({ session_id = null, res = null, forceNew = false }) {
   if (!res?.ok) {

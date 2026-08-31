@@ -206,9 +206,9 @@ reset();
 recordWallet({ session_id: S, res: { ok: true, created: true, address: '0xW1', createdAt: 'now' } });
 check(17, 'wallet creation records the CUSTODIAL model and that no key was returned',
   only().outcome === 'CREATED' && /CUSTODIAL/i.test(only().summary)
-  && only().privateKeyReturned === false && only().signingWiredUp === false
-  && /AGENTRAIL_OWNER_KEY/.test(only().signingNote),
-  'also records that place_order does not yet sign with it, so the history cannot imply otherwise');
+  && only().privateKeyReturned === false && only().signingWiredUp === true
+  && /own key for this session_id/.test(only().signingNote),
+  'also records that place_order, redeem, and withdraw sign with this wallet, so the history reflects the actual custody model');
 
 recordWallet({ session_id: S, res: { ok: true, created: false, address: '0xW1', createdAt: 'now' } });
 check(18, 'the idempotent no-op is also logged — "nothing changed" is a fact worth having',

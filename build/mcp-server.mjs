@@ -6,7 +6,13 @@
 // that touches the chain lives in mcp-core.mjs, which wraps the proven build/
 // scripts. If you are looking for behaviour, look there.
 //
-// Run:  node build/mcp-server.mjs        (expects AGENTRAIL_OWNER_KEY in env)
+// Run:  node build/mcp-server.mjs        (per-session signing — each tool call
+//                                          requires session_id and signs with
+//                                          that session's own wallet from
+//                                          generate_wallet; AGENTRAIL_OWNER_KEY
+//                                          is a legacy path used only by
+//                                          standalone build/ scripts, never by
+//                                          the tools registered in this file)
 // Test: node build/mcp-test.mjs          (calls the same functions directly)
 // ============================================================================
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -62,33 +68,52 @@ server.registerTool('place_order', {
       .describe('How many ticks above the best resting ask to bid. 20 is the value that filled in the Phase A proof.'),
     window_seconds: z.number().int().default(300)
       .describe('Asserted against the market\'s actual intervalSec; a mismatch is refused.'),
-    session_id: z.string().optional()
-      .describe('Which user/session trade log to record this order under. Optional — defaults to AGENTRAIL_SESSION_ID or "default". Pass the same session_id used for generate_wallet to keep one user\'s wallet, orders and redemptions in a single history.'),
+    session_id: z.string()
+      .describe('REQUIRED. Identifies which dedicated wallet signs and funds this order — the caller\'s own wallet from generate_wallet, not a shared key. Also the trade-log history this order is recorded under. There is no default and no shared fallback wallet; a session_id with no wallet yet is refused.'),
   },
 }, wrap(core.place_order));
 
 server.registerTool('get_position', {
   title: 'Get held position and market status',
-  description: `For one market: the owner's ERC6909 balance in both outcome token ids, plus whether the market is Trading / Finalized on-chain. winningOutcome is withheld until the market is finalized, because getMarketOnchain returns 0 as a pre-settlement default which misreads as "YES won". ${SCOPE}`,
-  inputSchema: { market_id: z.string().describe('marketId to inspect.') },
+  description: `For one market: the session's own dedicated wallet's ERC6909 balance in both outcome token ids, plus whether the market is Trading / Finalized on-chain. winningOutcome is withheld until the market is finalized, because getMarketOnchain returns 0 as a pre-settlement default which misreads as "YES won". ${SCOPE}`,
+  inputSchema: {
+    market_id: z.string().describe('marketId to inspect.'),
+    session_id: z.string()
+      .describe('REQUIRED. Whose dedicated wallet to read the position from — a position is scoped to one wallet, and there is no shared wallet this could otherwise mean.'),
+  },
 }, wrap(core.get_position));
 
 server.registerTool('redeem', {
   title: 'Redeem finalized winning positions (hard-guarded)',
-  description: `Discovers settled positions via listBinaryMarkets({status:"Finalized"}) — NOT default discovery, which is a disjoint set and silently reports nothing owed. Ensures the token-wide ERC6909 operator grant (read first, never assumed). Then runs the shared redeemGuard on every leg BEFORE any broadcast: a BLOCK refuses and reports, leaving the position intact. This matters because a losing redeem does NOT revert — it burns the position and pays zero with a success receipt. Payout is confirmed by tUSDC balance delta. ${SCOPE}`,
+  description: `Discovers settled positions via listBinaryMarkets({status:"Finalized"}) — NOT default discovery, which is a disjoint set and silently reports nothing owed. Ensures the token-wide ERC6909 operator grant (read first, never assumed). Then runs the shared redeemGuard on every leg BEFORE any broadcast: a BLOCK refuses and reports, leaving the position intact. This matters because a losing redeem does NOT revert — it burns the position and pays zero with a success receipt. Payout is confirmed by tUSDC balance delta and lands in the SAME session wallet that held the position. ${SCOPE}`,
   inputSchema: {
     market_id: z.string().optional()
       .describe('Restrict to one market. Omit to scan every finalized market for held positions.'),
     dry_run: z.boolean().default(false)
       .describe('Run discovery and the guard, report what would happen, broadcast nothing.'),
-    session_id: z.string().optional()
-      .describe('Which user/session trade log to record each leg under. Optional — defaults to AGENTRAIL_SESSION_ID or "default". Every leg gets its own entry, so a guard BLOCK is logged separately from any payout.'),
+    session_id: z.string()
+      .describe('REQUIRED. Identifies which dedicated wallet\'s positions to redeem and sign the redemption with, and which trade-log history each leg is recorded under. Every leg gets its own entry, so a guard BLOCK is logged separately from any payout.'),
   },
 }, wrap(core.redeem));
 
+server.registerTool('withdraw', {
+  title: 'Withdraw tUSDC or SOMI from a session\'s dedicated wallet to an address',
+  description: `Sends funds OUT of the caller's own dedicated wallet (generated by generate_wallet) to a destination address the caller supplies — there is no default or previously-used destination; to_address is required on every call. tUSDC (collateral) and SOMI (native gas) are separate balances with separate transfer mechanics and must be withdrawn separately via the \`asset\` parameter. A tUSDC withdrawal is refused up front, before broadcasting, if the wallet lacks enough SOMI to pay for the transaction's own gas — tUSDC cannot pay for its own transfer. amount:"max" (the default) withdraws the full balance; for SOMI this reserves estimated gas for the withdrawal transaction itself so the wallet is not left unable to broadcast, for tUSDC it withdraws the entire ERC20 balance. Confirmed by transaction receipt status plus balance delta, same discipline as place_order and redeem — never by tx status alone. This does not touch open positions or risk-guardrail state: a dedicated wallet's balance is not itself reserved by anything until an order places it, so withdrawing needs no interaction with the risk ledger.`,
+  inputSchema: {
+    session_id: z.string()
+      .describe('REQUIRED. Identifies which dedicated wallet the funds leave from and sign with.'),
+    to_address: z.string()
+      .describe('REQUIRED. Destination 0x address. No default, no implicit sweep target — always explicit.'),
+    asset: z.enum(['tUSDC', 'SOMI'])
+      .describe('Which balance to withdraw. tUSDC is collateral; SOMI is native gas. They are withdrawn separately.'),
+    amount: z.union([z.number(), z.literal('max')]).default('max')
+      .describe('Amount to withdraw, in the asset\'s own units (not raw/wei). "max" (default) withdraws the full balance — for SOMI, minus estimated gas for the withdrawal transaction itself.'),
+  },
+}, wrap(core.withdraw));
+
 server.registerTool('generate_wallet', {
   title: 'Create a purpose-only dedicated wallet for a session',
-  description: `Generates a fresh keypair for a session and returns ONLY the address — the private key is never returned to the caller and stays server-side. Per the spec's custody model, a user funds this purpose-only wallet with what they intend to trade instead of exposing a main wallet, so the blast radius is bounded by the deposit. IDEMPOTENT: calling twice for the same session_id returns the FIRST wallet with created:false rather than generating a second one, because rotating an address that may already hold a deposit would strand those funds. CUSTODY, stated plainly: this is a CUSTODIAL model — AgentRail holds the key and CAN move these funds. That is a DIFFERENT model from the operator-delegation design, where the operator key is scoped on-chain and architecturally cannot move funds; do not describe this wallet as non-custodial. Keys are plaintext JSON on local disk with no encryption and no recovery path. NOTE: place_order does not yet sign with this wallet — routing execution through it is separate, unimplemented work.`,
+  description: `Generates a fresh keypair for a session and returns ONLY the address — the private key is never returned to the caller and stays server-side. Per the spec's custody model, a user funds this purpose-only wallet with what they intend to trade instead of exposing a main wallet, so the blast radius is bounded by the deposit. IDEMPOTENT: calling twice for the same session_id returns the FIRST wallet with created:false rather than generating a second one, because rotating an address that may already hold a deposit would strand those funds. CUSTODY, stated plainly: this is a CUSTODIAL model — AgentRail holds the key and CAN move these funds. That is a DIFFERENT model from the operator-delegation design, where the operator key is scoped on-chain and architecturally cannot move funds; do not describe this wallet as non-custodial. Keys are plaintext JSON on local disk with no encryption and no recovery path. This wallet is what place_order, redeem, and withdraw all sign with for this session_id — it is not an inert deposit address.`,
   inputSchema: {
     session_id: z.string().describe('Identifier the wallet is stored under and looked up by later. Required, non-empty.'),
     label: z.string().optional().describe('Optional human-readable note stored alongside the address.'),
@@ -145,7 +170,7 @@ server.registerTool('get_trade_log', {
       .describe('Whose history to read. Defaults to AGENTRAIL_SESSION_ID or "default". The response lists sessionsKnown if you need to discover ids.'),
     limit: z.number().int().default(50)
       .describe('Maximum entries to return. The MOST RECENT matching entries are returned and `elided` reports how many older ones were left out.'),
-    kind: z.enum(['ORDER', 'REDEEM', 'WALLET']).optional()
+    kind: z.enum(['ORDER', 'REDEEM', 'WALLET', 'WITHDRAWAL']).optional()
       .describe('Filter to one category. Summary counts still cover the whole file.'),
     outcome: z.string().optional()
       .describe('Filter by outcome, e.g. FILLED, PENDING, NOT_FILLED, REFUSED, REVERTED, REDEEMED, BLOCKED, ZERO_PAYOUT, CREATED, DEPOSIT.'),

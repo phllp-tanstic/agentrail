@@ -141,7 +141,7 @@ export function generate_wallet({ session_id, label = null, force_new = false } 
     custody: CUSTODY_DISCLOSURE,
     storage: STORE_DISCLOSURE,
     nextStep: 'Deposit tUSDC (and SOMI for gas) to this address, then call get_wallet_balance to confirm the deposit landed before trading.',
-    notWiredYet: 'IMPORTANT: place_order does NOT yet sign with this wallet — it still signs with AGENTRAIL_OWNER_KEY. This tool creates and observes a dedicated wallet; routing execution through it is separate work and is not implemented.',
+    custodySigning: 'place_order, redeem, and withdraw all sign with THIS wallet\'s own key for this session_id — not a shared owner key. This is the actual signing wallet, not an inert deposit address.',
   };
 }
 

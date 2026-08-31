@@ -25,7 +25,7 @@ import * as SDK from '@somnia-chain/markets-sdk';
 import { somniaShannon } from '@somnia-chain/markets-sdk/chains';
 import {
   createPublicClient, createWalletClient, http, erc20Abi, encodeFunctionData,
-  formatUnits,
+  formatUnits, parseUnits,
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { redeemGuard } from './redeem-guard.mjs';
@@ -34,11 +34,12 @@ import { checkPreOrder, commitReservation, releaseReservation, recordSpend,
   recordPayout, riskSnapshot, RISK_CONFIG } from './risk.mjs';
 // Re-exported below as tools; also needed as a local binding, which `export ... from`
 // does not create.
-import { list_wallets as walletList, generate_wallet as walletGenerate } from './wallet.mjs';
+import { list_wallets as walletList, generate_wallet as walletGenerate,
+  _privateKeyForSession, CUSTODY_DISCLOSURE } from './wallet.mjs';
 import { normalizeIntent as normalizeIntentLocal,
   normalizeMinSecondsToExpiry as normalizeRunwayLocal } from './intent.mjs';
 import { recordOrder, recordRedeem, recordWallet, recordBalanceObservation,
-  resolveSession } from './trade-log.mjs';
+  recordWithdrawal, resolveSession } from './trade-log.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -128,35 +129,95 @@ async function rawCall({ from, to, data }) {
 }
 
 // ------------------------------------------------------------ lazy chain ctx
-// Read-only tools must work with no key present; only write tools require one.
-let _ctx = null;
-function ctx({ requireKey = false } = {}) {
-  if (!_ctx) {
-    const pc = createPublicClient({ chain: somniaShannon, transport: http(RPC) });
-    const ex = new SDK.SomniaMarkets({ chain: somniaShannon, rpcUrl: RPC, indexerUrl: INDEXER, addresses: A });
-    const KEY = process.env.AGENTRAIL_OWNER_KEY;
-    const owner = KEY ? privateKeyToAccount(KEY) : null;
-    const wc = owner ? createWalletClient({ account: owner, chain: somniaShannon, transport: http(RPC) }) : null;
-    _ctx = { pc, ex, owner, wc };
-  }
-  if (requireKey && !_ctx.owner) {
-    throw new Error('AGENTRAIL_OWNER_KEY is not set — this tool signs transactions and cannot run without it.');
-  }
-  return _ctx;
+// PER-SESSION (this revision). Read-only tools work with no session_id/key
+// present (pass session_id: null); only write tools require one, and the key
+// used is now the CALLER'S OWN dedicated wallet (wallet.mjs's per-session
+// keypair), resolved via _privateKeyForSession — NOT a single shared
+// AGENTRAIL_OWNER_KEY signing for everyone. This is the actual fix for the
+// custody gap flagged in wallet.mjs's own header: a generated wallet was
+// previously an inert deposit address that place_order never signed with.
+//
+// AGENTRAIL_OWNER_KEY is kept ONLY as an explicit, clearly-labelled legacy
+// path for direct script callers that pass no session_id (e.g. existing
+// build/ proof scripts run standalone, outside the MCP server). Every path
+// reachable through the MCP tools now requires session_id and refuses to
+// silently fall back to the shared key — a silent fallback would quietly
+// re-open the exact hole this change closes.
+//
+// One client per session_id, cached for the process lifetime — a real
+// deployment moves this cache out of process memory along with everything
+// else in Tier 1 #4/#5 (persistence, multi-instance).
+const _ctxBySession = new Map();
+let _ownerCtx = null; // legacy, non-session path — see note above
+
+function _buildCtx(owner) {
+  const pc = createPublicClient({ chain: somniaShannon, transport: http(RPC) });
+  const ex = new SDK.SomniaMarkets({ chain: somniaShannon, rpcUrl: RPC, indexerUrl: INDEXER, addresses: A });
+  const wc = owner ? createWalletClient({ account: owner, chain: somniaShannon, transport: http(RPC) }) : null;
+  return { pc, ex, owner, wc };
 }
 
-const bal6909 = (id) => ctx().pc.readContract({
+/**
+ * ctx({ session_id, requireKey })
+ *
+ * - session_id present: signs with THAT session's own dedicated wallet key.
+ *   Throws if requireKey and no wallet exists yet for that session_id (the
+ *   caller must call generate_wallet first — there is nothing to fall back to).
+ * - session_id absent/null: read-only, chain-only context (pc/ex, no owner/wc).
+ *   Throws if requireKey is also true — a write path always needs a session.
+ * - LEGACY: if session_id is explicitly the literal string
+ *   '__legacy_owner_key__', signs with AGENTRAIL_OWNER_KEY. This exists so the
+ *   already-proven standalone scripts in build/ (part3-win-proof.mjs, etc.)
+ *   keep working unmodified; the MCP tool layer (mcp-server.mjs) never passes
+ *   this value — every MCP-facing write path must go through a real session.
+ */
+function ctx({ session_id = null, requireKey = false } = {}) {
+  if (session_id === '__legacy_owner_key__') {
+    if (!_ownerCtx) {
+      const KEY = process.env.AGENTRAIL_OWNER_KEY;
+      const owner = KEY ? privateKeyToAccount(KEY) : null;
+      _ownerCtx = _buildCtx(owner);
+    }
+    if (requireKey && !_ownerCtx.owner) {
+      throw new Error('AGENTRAIL_OWNER_KEY is not set — the legacy owner-key path signs transactions and cannot run without it.');
+    }
+    return _ownerCtx;
+  }
+
+  if (!session_id) {
+    if (requireKey) {
+      throw new Error('ctx({requireKey:true}) called with no session_id. Every write path must identify which session\'s wallet is signing — there is no shared fallback key. Pass the caller\'s session_id.');
+    }
+    // read-only, chain-only — cached once, since it carries no key
+    if (!_ctxBySession.has('__readonly__')) _ctxBySession.set('__readonly__', _buildCtx(null));
+    return _ctxBySession.get('__readonly__');
+  }
+
+  const sid = String(session_id).trim();
+  if (!_ctxBySession.has(sid)) {
+    const pk = _privateKeyForSession(sid);
+    const owner = pk ? privateKeyToAccount(pk) : null;
+    _ctxBySession.set(sid, _buildCtx(owner));
+  }
+  const c = _ctxBySession.get(sid);
+  if (requireKey && !c.owner) {
+    throw new Error(`No dedicated wallet exists yet for session_id="${sid}". Call generate_wallet first — this tool signs with the session's own wallet and there is no shared key to fall back to.`);
+  }
+  return c;
+}
+
+const bal6909 = (session_id, id) => ctx({ session_id }).pc.readContract({
   address: OUTCOME_TOKEN, abi: SDK.erc6909Abi, functionName: 'balanceOf',
-  args: [ctx({ requireKey: true }).owner.address, BigInt(id)] });
-const balColl = () => ctx().pc.readContract({
+  args: [ctx({ session_id, requireKey: true }).owner.address, BigInt(id)] });
+const balColl = (session_id) => ctx({ session_id }).pc.readContract({
   address: COLL, abi: erc20Abi, functionName: 'balanceOf',
-  args: [ctx({ requireKey: true }).owner.address] });
+  args: [ctx({ session_id, requireKey: true }).owner.address] });
 
 // send() lifted from part3-win-proof.mjs:63-70. Throws on a non-success receipt
 // by default (redeem relies on that). Pass throwOnRevert:false to get the receipt
 // back instead, so a caller can classify the failure and decide about retrying.
-async function send(txlog, label, req, { throwOnRevert = true } = {}) {
-  const { wc, pc } = ctx({ requireKey: true });
+async function send(session_id, txlog, label, req, { throwOnRevert = true } = {}) {
+  const { wc, pc } = ctx({ session_id, requireKey: true });
   const hash = await wc.sendTransaction(req);
   const rcpt = await pc.waitForTransactionReceipt({ hash });
   txlog[label] = { hash, status: rcpt.status, block: Number(rcpt.blockNumber),
@@ -255,12 +316,22 @@ async function place_order_inner(input = {}) {
   const {
     market_id, direction = 'YES', cross_ticks = 20, window_seconds = 300,
   } = input;
+  const session_id = input.session_id ?? input.sessionId ?? null;
   // Accept both the camelCase names Phase C specified and snake_case matching the
   // existing tool surface, so either spelling works from any caller.
   const targetDollarAmount = input.targetDollarAmount ?? input.target_dollar_amount ?? null;
   const SLIP = resolveMaxSlippagePct(input.maxSlippagePct ?? input.max_slippage_pct ?? 5);
   const maxSlippagePct = SLIP.maxSlippagePct;
   const stakeUnitsIn = input.stake_units ?? input.stakeUnits ?? null;
+
+  // PER-SESSION CUSTODY: this is now a required argument, not just a logging
+  // tag. It selects WHICH wallet signs. Refusing here — rather than at ctx()
+  // several lines later — gives a clear, specific reason instead of a generic
+  // "no key" throw.
+  if (!session_id) {
+    return { ok: false, refused: true, reason: 'session_id_required',
+      detail: 'session_id is required. It identifies which dedicated wallet signs this order — there is no shared wallet to fall back to. Call generate_wallet for this session_id first if you have not already.' };
+  }
 
   const dir = String(direction).toUpperCase();
   if (!ALLOWED_DIRECTIONS.includes(dir)) {
@@ -285,9 +356,9 @@ async function place_order_inner(input = {}) {
       detail: `targetDollarAmount=${targetDollarAmount} must be a positive number.` };
   }
 
-  const { ex, owner } = ctx({ requireKey: true });
-  const R = { tool: 'place_order', owner: owner.address, marketId: market_id,
-    direction: dir, sizingMode, tx: {}, attempts: [] };
+  const { ex, owner } = ctx({ session_id, requireKey: true });
+  const R = { tool: 'place_order', sessionId: session_id, owner: owner.address, marketId: market_id,
+    direction: dir, sizingMode, tx: {}, attempts: [], custody: CUSTODY_DISCLOSURE };
 
   const { m: M, source } = await findMarket(market_id);
   if (!M) return { ok: false, reason: 'market_not_found',
@@ -321,7 +392,7 @@ async function place_order_inner(input = {}) {
 
   const commit = (actualSpentUsd, note) => {
     if (!reservationId || reservationResolved) return;
-    commitReservation({ reservationId, marketId: market_id, actualSpentUsd });
+    commitReservation({ session_id, reservationId, marketId: market_id, actualSpentUsd });
     reservationResolved = true;
     R.reservation = { reservationId, resolution: 'COMMITTED',
       actualSpentUsd: Number(Number(actualSpentUsd).toFixed(6)), note };
@@ -339,7 +410,7 @@ async function place_order_inner(input = {}) {
   // building the return value, makes the payload and the state agree.
   const release = (why) => {
     if (!reservationId || reservationResolved) return;
-    releaseReservation({ reservationId, why });
+    releaseReservation({ session_id, reservationId, why });
     reservationResolved = true;
     R.reservation = { reservationId, resolution: 'RELEASED', why,
       note: 'Refused after reserving. The reservation was released, so this order consumes no risk capacity.' };
@@ -430,12 +501,12 @@ async function place_order_inner(input = {}) {
     // stale total. Only on attempt 1: a retry re-places the same intent and reuses
     // the existing reservation rather than taking a second one.
     if (attempt === 1) {
-      const rk = checkPreOrder({ marketId: market_id, estimatedSpendUsd: worstCaseSpendUsd });
+      const rk = checkPreOrder({ session_id, marketId: market_id, estimatedSpendUsd: worstCaseSpendUsd });
       AT.riskCheck = rk;
       if (!rk.allow) {
         R.attempts.push(AT);
         return { ok: false, refused: true, ...R, reason: rk.code, detail: rk.reason,
-          riskStatus: riskSnapshot() };
+          riskStatus: riskSnapshot(session_id) };
       }
       riskApproved = rk;
       reservationId = rk.reservationId;
@@ -458,14 +529,14 @@ async function place_order_inner(input = {}) {
       const spender = '0x' + sim.data.slice(34, 74);
       AT.allowance = { needed: true, spender };
       try {
-        await send(R.tx, `a${attempt}_approve`, { to: COLL, data: encodeFunctionData({
+        await send(session_id, R.tx, `a${attempt}_approve`, { to: COLL, data: encodeFunctionData({
           abi: erc20Abi, functionName: 'approve', args: [spender, 2n ** 256n - 1n] }) });
       } catch (e) {
         AT.allowanceError = e.shortMessage ?? e.message;
         R.attempts.push(AT);
         release('allowance approval failed — nothing was placed');
         return { ok: false, ...R, reason: 'allowance_failed', detail: AT.allowanceError,
-          riskStatus: riskSnapshot() };
+          riskStatus: riskSnapshot(session_id) };
       }
       sim = await rawCall({ from: owner.address, to: M.poolAddress, data: dYes });
     } else {
@@ -497,7 +568,7 @@ async function place_order_inner(input = {}) {
       release(`slippage guard refused the order (${slippagePct.toFixed(4)}% > ${maxSlippagePct}%) — nothing was broadcast`);
       return { ok: false, refused: true, ...R, reason: 'slippage_exceeded',
         detail: `best ask moved ${slippagePct.toFixed(4)}% (${referencePrice} -> ${placementPrice}) between sizing and placement, exceeding maxSlippagePct=${maxSlippagePct}. The quantity sized for $${targetDollarAmount} would now spend about $${toUsd((placementPrice * QTY) / ONE).toFixed(6)}. NOT broadcast.`,
-        riskStatus: riskSnapshot() };
+        riskStatus: riskSnapshot(session_id) };
     }
 
     AT.simulation = sim.ok ? 'NO REVERT' : decodeRevert(sim.data);
@@ -506,17 +577,17 @@ async function place_order_inner(input = {}) {
       release('order simulation reverted — nothing was broadcast');
       return { ok: false, ...R, reason: 'simulation_reverted',
         detail: `order simulation reverted: ${AT.simulation} — NOT broadcast.`,
-        riskStatus: riskSnapshot() };
+        riskStatus: riskSnapshot(session_id) };
     }
     AT.calldata = { selector: dYes.slice(0, 10), bytes: (dYes.length - 2) / 2, path: 'self placeBinaryOrder' };
 
     // ------------------------------------------------------------- broadcast
     // TASK 1: a reverted broadcast is a NORMAL, state-dependent outcome — not an
     // exception. Return the same structured shape as every other failure path.
-    const yesBefore = await bal6909(M.yesTokenId), collBefore = await balColl();
+    const yesBefore = await bal6909(session_id, M.yesTokenId), collBefore = await balColl(session_id);
     let rcpt = null, sendError = null;
     try {
-      rcpt = await send(R.tx, `a${attempt}_placeBinaryOrder_BUY_YES`,
+      rcpt = await send(session_id, R.tx, `a${attempt}_placeBinaryOrder_BUY_YES`,
         { to: M.poolAddress, data: dYes }, { throwOnRevert: false });
     } catch (e) {
       sendError = e.shortMessage ?? e.message;
@@ -555,12 +626,12 @@ async function place_order_inner(input = {}) {
           ? `the placement transaction reverted on-chain (tx ${rcpt?.transactionHash}). This is a NORMAL, often state-dependent outcome — Phase B observed a revert after a clean simulation where the identical calldata replayed at its own block succeeded, consistent with resting liquidity being taken by a competing fill in the same block. It is not necessarily a sign of a deeper problem. No collateral was committed by a reverted transaction.${attempt >= MAX_ATTEMPTS ? ` One automatic retry was already used; not retrying again.` : ''}`
           : `the placement could not be submitted: ${sendError}. Classified NOT retryable (a send-layer failure, not an on-chain revert).`,
         retryable,
-        riskStatus: riskSnapshot() };
+        riskStatus: riskSnapshot(session_id) };
     }
 
     // ------------------------------------------------- bounded fill resolution
     const tReceipt = Date.now();
-    const yesAtReceipt = await bal6909(M.yesTokenId), collAtReceipt = await balColl();
+    const yesAtReceipt = await bal6909(session_id, M.yesTokenId), collAtReceipt = await balColl(session_id);
 
     // A read taken immediately after the receipt is not a durable answer: an order
     // that rests is often taken seconds later by a maker crossing it. So
@@ -582,11 +653,11 @@ async function place_order_inner(input = {}) {
         // An order cannot fill once the window expires — stop rather than poll on.
         if (Math.floor(Date.now() / 1000) >= Number(M.expiry)) { stoppedReason = 'expiry'; break; }
         await new Promise((r) => setTimeout(r, POLL_EVERY_MS));
-        const b = await bal6909(M.yesTokenId).catch(() => null);
+        const b = await bal6909(session_id, M.yesTokenId).catch(() => null);
         const elapsed = Number(((Date.now() - tReceipt) / 1000).toFixed(1));
         observations.push({ atSeconds: elapsed, erc6909: b === null ? 'READ FAILED' : String(b) });
         if (b !== null && b > yesBefore) {
-          yesAfter = b; collAfter = await balColl();
+          yesAfter = b; collAfter = await balColl(session_id);
           stoppedReason = 'filled';
           resolution = { latencySecondsObserved: elapsed, polls: observations.length, resolvedAt: 'poll',
             granularity: `±${POLL_EVERY_MS / 1000}s — the fill landed somewhere in the ${POLL_EVERY_MS / 1000}s before this observation, so this is an upper bound`,
@@ -598,7 +669,7 @@ async function place_order_inner(input = {}) {
       fillStatus = stoppedReason === 'filled' ? 'FILLED'
         : stoppedReason === 'expiry' ? 'NOT_FILLED'   // terminal: window closed
           : 'PENDING';                               // unresolved — NOT "did not fill"
-      if (stoppedReason !== 'filled') collAfter = await balColl();
+      if (stoppedReason !== 'filled') collAfter = await balColl(session_id);
     }
 
     // filled: true | false | null. null === PENDING (unresolved). Callers must not
@@ -657,7 +728,7 @@ async function place_order_inner(input = {}) {
     // merely LOCKED collateral at our limit is still counted — that capital is
     // genuinely committed until the order fills or expires.
     commit(spentUsd, `fillStatus=${fillStatus}; reserved worst case ${riskApproved?.reservedNowUsd ?? '?'} USD, actual collateral delta ${spentUsd} USD`);
-    R.riskStatus = riskSnapshot();
+    R.riskStatus = riskSnapshot(session_id);
 
     if (fillStatus === 'PENDING') {
       R.pending = `UNRESOLVED, NOT a non-fill. The order is accepted and resting and may still fill before expiry (${Number(M.expiry)}). Do not treat this as "did not fill". Recheck with get_position({market_id:"${market_id}"}) — its ERC6909 balance is the authoritative holding. If it never fills, the locked collateral is refunded automatically at expiry (PROOF-LOG RUN 3 PART 4).`;
@@ -672,7 +743,7 @@ async function place_order_inner(input = {}) {
   release('attempt loop exhausted without a terminal result');
   return { ok: false, ...R, reason: 'exhausted_attempts',
     detail: `all ${MAX_ATTEMPTS} attempts finished without a terminal result.`,
-    riskStatus: riskSnapshot() };
+    riskStatus: riskSnapshot(session_id) };
 
   } finally {
     // BACKSTOP — a reservation must NEVER leak. Every refusal path above now
@@ -683,7 +754,7 @@ async function place_order_inner(input = {}) {
     // Without it, a leaked reservation would permanently consume capacity that no
     // real order explains — risk-test.mjs assertion 22 demonstrates that failure.
     if (reservationId && !reservationResolved) {
-      releaseReservation({ reservationId,
+      releaseReservation({ session_id, reservationId,
         why: 'place_order exited without resolving the reservation (thrown error or unexpected exit path) — released by the try/finally backstop' });
       R.reservation = { reservationId, resolution: 'RELEASED_BY_BACKSTOP',
         note: 'The flow exited without a terminal order outcome. The reservation was released so it cannot eat capacity with no real order behind it. NOTE: a payload already returned by that exit path cannot show this — it was constructed before this block ran.' };
@@ -723,22 +794,27 @@ export async function place_order(input = {}) {
 // TOOL 3 — get_position
 // ERC6909 balance for both outcome token ids + the market's on-chain status.
 // ============================================================================
-export async function get_position({ market_id }) {
+export async function get_position({ market_id, session_id = null, sessionId = null } = {}) {
+  const sid = session_id ?? sessionId ?? null;
   if (!market_id) return { ok: false, refused: true, reason: 'market_id is required.' };
-  const { ex, owner } = ctx({ requireKey: true });
+  if (!sid) {
+    return { ok: false, refused: true, reason: 'session_id_required',
+      detail: 'session_id is required. A position is a balance held by one session\'s own dedicated wallet — there is no shared wallet whose position this could otherwise mean.' };
+  }
+  const { ex, owner } = ctx({ session_id: sid, requireKey: true });
   const { m: M, source } = await findMarket(market_id);
   if (!M) return { ok: false, error: `market ${market_id} not found in the live listing or the Finalized scan.` };
   const DEC = Number(M.quoteDecimals);
 
   const oc = await ex.client.getMarketOnchain(market_id).catch(() => null);
-  const yes = await bal6909(M.yesTokenId), no = await bal6909(M.noTokenId);
+  const yes = await bal6909(sid, M.yesTokenId), no = await bal6909(sid, M.noTokenId);
 
   // status label: 1/Trading is the write gate; finalized/isResolved is the redeem gate
   const settled = oc?.finalized === true || oc?.isResolved === true;
   const trading = oc?.status === 1 || oc?.status === 'Trading';
   const label = trading ? 'Trading' : settled ? 'Finalized' : `status=${oc?.status ?? 'unknown'}`;
 
-  return { ok: true, tool: 'get_position', owner: owner.address,
+  return { ok: true, tool: 'get_position', sessionId: sid, owner: owner.address,
     marketId: market_id, asset: M.asset, pool: M.poolAddress,
     intervalSec: Number(M.intervalSec), expiry: Number(M.expiry), marketSource: source,
     status: { label, onchainStatus: oc?.status ?? null, tradingGateOpen: trading,
@@ -750,7 +826,7 @@ export async function get_position({ market_id }) {
       yesTokenId: String(M.yesTokenId), yesBalanceRaw: String(yes), yesBalanceUnits: formatUnits(yes, DEC),
       noTokenId: String(M.noTokenId), noBalanceRaw: String(no), noBalanceUnits: formatUnits(no, DEC),
       hasPosition: yes > 0n || no > 0n },
-    collateralBalance: formatUnits(await balColl(), COLL_DEC) };
+    collateralBalance: formatUnits(await balColl(sid), COLL_DEC) };
 }
 
 // ============================================================================
@@ -764,9 +840,13 @@ export async function get_position({ market_id }) {
 // logged exactly as prominently as a payout — that asymmetry is the whole trust
 // story, since a refused redemption is what PRESERVED value here.
 // ============================================================================
-async function redeem_inner({ market_id = null, dry_run = false } = {}) {
-  const { ex, owner } = ctx({ requireKey: true });
-  const R = { tool: 'redeem', owner: owner.address, dryRun: !!dry_run, tx: {},
+async function redeem_inner({ market_id = null, dry_run = false, session_id = null } = {}) {
+  if (!session_id) {
+    return { ok: false, refused: true, reason: 'session_id_required',
+      detail: 'session_id is required. Redemption burns outcome tokens held by one session\'s own dedicated wallet and pays collateral into that same wallet — there is no shared wallet this could otherwise apply to.' };
+  }
+  const { ex, owner } = ctx({ session_id, requireKey: true });
+  const R = { tool: 'redeem', sessionId: session_id, owner: owner.address, dryRun: !!dry_run, tx: {},
     discovery: {}, legs: [], blocked: [], redeemed: [] };
 
   // --- STEP 5: Finalized-status scan. NOT loadMarkets()/default discovery.
@@ -781,8 +861,8 @@ async function redeem_inner({ market_id = null, dry_run = false } = {}) {
   // --- which finalized markets do we actually hold tokens in?
   for (const m of candidates) {
     const DEC = Number(m.quoteDecimals);
-    const yes = await bal6909(m.yesTokenId).catch(() => 0n);
-    const no = await bal6909(m.noTokenId).catch(() => 0n);
+    const yes = await bal6909(session_id, m.yesTokenId).catch(() => 0n);
+    const no = await bal6909(session_id, m.noTokenId).catch(() => 0n);
     if (yes === 0n && no === 0n) continue;
     if (yes > 0n) R.legs.push({ marketId: m.marketId, m, idx: 0, label: 'YES', amount: yes, units: formatUnits(yes, DEC) });
     if (no > 0n) R.legs.push({ marketId: m.marketId, m, idx: 1, label: 'NO', amount: no, units: formatUnits(no, DEC) });
@@ -796,7 +876,7 @@ async function redeem_inner({ market_id = null, dry_run = false } = {}) {
   // so it does not recur per market (unlike the per-pool ERC20 allowance).
   let isOp = null, opErr = null;
   try {
-    isOp = await ctx().pc.readContract({ address: OUTCOME_TOKEN, abi: SDK.erc6909Abi,
+    isOp = await ctx({ session_id }).pc.readContract({ address: OUTCOME_TOKEN, abi: SDK.erc6909Abi,
       functionName: 'isOperator', args: [owner.address, MODULE] });
   } catch (e) { opErr = e.shortMessage ?? e.message; }
   R.erc6909Operator = { token: OUTCOME_TOKEN, module: MODULE, isOperatorBefore: isOp, readError: opErr };
@@ -816,8 +896,8 @@ async function redeem_inner({ market_id = null, dry_run = false } = {}) {
     if (dry_run) {
       R.erc6909Operator.case = 'NOT GRANTED — would broadcast setOperator (dry_run, skipped)';
     } else {
-      await send(R.tx, 'setOperator_module', { to: OUTCOME_TOKEN, data: setOpData });
-      const nowOp = await ctx().pc.readContract({ address: OUTCOME_TOKEN, abi: SDK.erc6909Abi,
+      await send(session_id, R.tx, 'setOperator_module', { to: OUTCOME_TOKEN, data: setOpData });
+      const nowOp = await ctx({ session_id }).pc.readContract({ address: OUTCOME_TOKEN, abi: SDK.erc6909Abi,
         functionName: 'isOperator', args: [owner.address, MODULE] }).catch(() => null);
       R.erc6909Operator.case = nowOp === true ? 'BROADCAST — granted, reads back true' : `BROADCAST — reads back ${nowOp}`;
       R.erc6909Operator.isOperatorAfter = nowOp;
@@ -839,7 +919,7 @@ async function redeem_inner({ market_id = null, dry_run = false } = {}) {
     if (!g.allow) {
       // Refuse and report. Same behaviour as the proven script: NOT broadcast,
       // position left intact rather than burned for zero.
-      const still = await bal6909(leg.idx === 0 ? m.yesTokenId : m.noTokenId).catch(() => null);
+      const still = await bal6909(session_id, leg.idx === 0 ? m.yesTokenId : m.noTokenId).catch(() => null);
       entry.broadcast = false;
       entry.outcome = `BLOCKED — NOT BROADCAST. Position left intact (${still ?? leg.amount} tokens preserved, not burned).`;
       entry.tokensPreserved = String(still ?? leg.amount);
@@ -858,9 +938,9 @@ async function redeem_inner({ market_id = null, dry_run = false } = {}) {
     entry.simulation = pre.ok ? 'NO REVERT' : decodeRevert(pre.data);
     if (!pre.ok) { entry.broadcast = false; entry.outcome = `simulation reverted — NOT broadcast`; R.blocked.push(entry); continue; }
 
-    const collPre = await balColl(), tokPre = await bal6909(leg.idx === 0 ? m.yesTokenId : m.noTokenId);
-    await send(R.tx, `redeem_${leg.label}_${leg.marketId.slice(-6)}`, { to: A.binaryModule, data });
-    const collPost = await balColl(), tokPost = await bal6909(leg.idx === 0 ? m.yesTokenId : m.noTokenId);
+    const collPre = await balColl(session_id), tokPre = await bal6909(session_id, leg.idx === 0 ? m.yesTokenId : m.noTokenId);
+    await send(session_id, R.tx, `redeem_${leg.label}_${leg.marketId.slice(-6)}`, { to: A.binaryModule, data });
+    const collPost = await balColl(session_id), tokPost = await bal6909(session_id, leg.idx === 0 ? m.yesTokenId : m.noTokenId);
     const payout = collPost - collPre;
 
     entry.broadcast = true;
@@ -870,12 +950,12 @@ async function redeem_inner({ market_id = null, dry_run = false } = {}) {
       confirmedBy: 'tUSDC balance delta + ERC6909 burn (NOT tx status — a losing redeem also returns status=success)' };
     entry.outcome = payout > 0n ? 'REDEEMED — non-zero payout confirmed by balance delta' : 'BROADCAST BUT ZERO PAYOUT';
     // Feed the payout into risk accounting so it reduces the day's drawdown.
-    if (payout > 0n) recordPayout({ marketId: leg.marketId, payoutUsd: Number(formatUnits(payout, COLL_DEC)) });
+    if (payout > 0n) recordPayout({ session_id, marketId: leg.marketId, payoutUsd: Number(formatUnits(payout, COLL_DEC)) });
     R.redeemed.push(entry);
   }
 
   R.legs = jsonSafe(R.legs.map(stripM));
-  R.riskStatus = riskSnapshot();
+  R.riskStatus = riskSnapshot(session_id);
   return { ok: true, ...R,
     summary: { positionsFound: R.positionsFound, redeemedCount: R.redeemed.length, blockedCount: R.blocked.length,
       totalPayoutUnits: R.redeemed.reduce((a, e) => a + Number(e.payout?.payoutUnits ?? 0), 0).toFixed(6) } };
@@ -888,7 +968,7 @@ export async function redeem({ market_id = null, dry_run = false, session_id = n
   const sid = session_id ?? sessionId ?? null;
   let res;
   try {
-    res = await redeem_inner({ market_id, dry_run });
+    res = await redeem_inner({ market_id, dry_run, session_id: sid });
   } catch (e) {
     const msg = e.shortMessage ?? e.message;
     recordRedeem({ session_id: sid, res: null, dry_run, thrown: msg });
@@ -901,6 +981,166 @@ export async function redeem({ market_id = null, dry_run = false, session_id = n
         error: failedWrites[0].error, note: failedWrites[0].note }
     : { recorded: true, entries: logged.length, seqs: logged.map((l) => l.seq),
         note: `${logged.length} entry/entries appended — one per leg, so a guard BLOCK appears separately from any payout. Read them with get_trade_log.` } };
+}
+
+// ============================================================================
+// TOOL 10 — withdraw
+//
+// WHY THIS EXISTS: Production Roadmap Tier 0 #2 — "AgentRail generates a
+// wallet and takes deposits into it. There is currently no mechanism for a
+// user to get funds back out except by trading them away." This is that
+// mechanism. It is the first tool that puts the per-session ctx() rewiring
+// (see that function's header) to use for something other than trading.
+//
+// SCOPE, deliberate: sends the full requested asset out of the CALLER'S OWN
+// dedicated wallet to an address the caller supplies, in either tUSDC
+// (ERC20 transfer) or SOMI (native transfer). No implicit/default
+// destination is ever used — to_address is always required and validated.
+// This does NOT interact with risk.mjs or any open position: a dedicated
+// wallet's balance is not itself "reserved" by anything until an order is
+// actually placed, so withdrawing collateral needs no reservation logic of
+// its own. If a caller withdraws funds they meant to trade with next, the
+// next place_order attempt simply fails on insufficient balance — a
+// sequencing problem for the caller, not a state this tool must guard.
+//
+// GAS ACCOUNTING: tUSDC and SOMI are not interchangeable (same fact
+// get_wallet_balance already reports) — a tUSDC withdrawal still needs SOMI
+// in the wallet to pay for its own transaction, and is refused up front if
+// there isn't enough, rather than broadcasting and failing at the send
+// layer. amount:"max" on SOMI reserves estimated gas for the withdrawal
+// transaction itself so the wallet is not left unable to broadcast; amount:
+// "max" on tUSDC withdraws the entire ERC20 balance, since tUSDC itself
+// carries no gas cost to hold at zero.
+// ============================================================================
+async function withdraw_inner({ session_id = null, to_address = null, asset = null, amount = null } = {}) {
+  if (!session_id) {
+    return { ok: false, refused: true, reason: 'session_id_required',
+      detail: 'session_id is required — it identifies which dedicated wallet the funds leave from. There is no shared or default wallet.' };
+  }
+  const ASSET = String(asset ?? '').toUpperCase();
+  if (!['TUSDC', 'SOMI'].includes(ASSET)) {
+    return { ok: false, refused: true, reason: 'asset_required',
+      detail: `asset must be "tUSDC" or "SOMI" (case-insensitive), got ${JSON.stringify(asset)}. They are separate balances with separate transfer mechanics (ERC20 vs native) and must be withdrawn separately.` };
+  }
+  if (!to_address || !/^0x[0-9a-fA-F]{40}$/.test(String(to_address))) {
+    return { ok: false, refused: true, reason: 'invalid_to_address',
+      detail: 'to_address must be a 20-byte hex address (0x + 40 hex chars). Required on every call — there is deliberately no default or previously-used destination to fall back to.' };
+  }
+
+  const { pc, owner } = ctx({ session_id, requireKey: true });
+  const R = { tool: 'withdraw', sessionId: session_id, fromAddress: owner.address,
+    toAddress: to_address, asset: ASSET === 'TUSDC' ? 'tUSDC' : 'SOMI', tx: {},
+    custody: CUSTODY_DISCLOSURE };
+
+  // Gas reservation uses maxFeePerGas, not a flat legacy gasPrice. This chain's
+  // actual broadcasts are EIP-1559 type-2 transactions (confirmed on-chain via
+  // block explorer — the tx type prefix is 0x02), where the real per-gas-unit
+  // cost is governed by base fee + priority fee, capped at maxFeePerGas. Sizing
+  // the reservation off a flat getGasPrice() figure can mismatch what viem's
+  // auto-filled EIP-1559 fields actually commit to. maxFeePerGas is the correct
+  // conservative ceiling: reserving against it can leave a little unspent gas
+  // headroom (harmless — same fail-closed bias as the risk ledger elsewhere in
+  // this codebase) but cannot under-reserve and fail to broadcast, which is the
+  // failure mode that matters for a "max" withdrawal.
+  const fees = await pc.estimateFeesPerGas().catch(() => null);
+  const gasPrice = fees?.maxFeePerGas ?? await pc.getGasPrice(); // legacy-chain fallback only
+
+  // ---------------------------------------------------------------- SOMI
+  if (ASSET === 'SOMI') {
+    const balBefore = await pc.getBalance({ address: owner.address });
+    const gasEstimate = await pc.estimateGas(
+      { account: owner.address, to: to_address, value: 1n }).catch(() => 21000n);
+    const gasCost = gasEstimate * gasPrice;
+
+    let sendRaw;
+    if (amount === 'max' || amount === null || amount === undefined) {
+      sendRaw = balBefore - gasCost;
+      if (sendRaw <= 0n) {
+        return { ok: false, ...R, reason: 'insufficient_balance_for_gas',
+          detail: `SOMI balance ${formatUnits(balBefore, 18)} is not enough to cover the estimated gas cost (${formatUnits(gasCost, 18)} SOMI, at maxFeePerGas ${formatUnits(gasPrice, 9)} gwei) of the withdrawal transaction itself. Nothing to withdraw after reserving gas.` };
+      }
+    } else {
+      sendRaw = parseUnits(String(amount), 18);
+      if (sendRaw <= 0n) {
+        return { ok: false, ...R, reason: 'zero_amount', detail: `amount=${amount} resolves to zero.` };
+      }
+      if (sendRaw + gasCost > balBefore) {
+        return { ok: false, ...R, reason: 'insufficient_balance',
+          detail: `Requested ${amount} SOMI + estimated gas ${formatUnits(gasCost, 18)} SOMI exceeds balance ${formatUnits(balBefore, 18)} SOMI. Pass amount:"max" to withdraw everything minus gas.` };
+      }
+    }
+
+    await send(session_id, R.tx, 'withdraw_SOMI', { to: to_address, value: sendRaw });
+    const balAfter = await pc.getBalance({ address: owner.address });
+    const t = R.tx.withdraw_SOMI;
+    return { ok: true, ...R,
+      amountSent: formatUnits(sendRaw, 18),
+      balanceBefore: formatUnits(balBefore, 18), balanceAfter: formatUnits(balAfter, 18),
+      confirmedBy: 'transaction receipt status + native balance delta',
+      tx: { hash: t.hash, status: t.status, block: t.block, gasUsed: t.gasUsed } };
+  }
+
+  // ---------------------------------------------------------------- tUSDC
+  // ERC20 transfer needs SOMI for gas — checked up front, not discovered by a
+  // failed broadcast, same discipline get_wallet_balance already uses. Gas is
+  // a REAL estimateGas() call against the actual transfer(to, amount) call,
+  // not a hardcoded guess — matches the SOMI branch's methodology and this
+  // codebase's general "measure, don't assume" discipline.
+  const collBefore = await pc.readContract(
+    { address: COLL, abi: erc20Abi, functionName: 'balanceOf', args: [owner.address] });
+  let sendRaw;
+  if (amount === 'max' || amount === null || amount === undefined) {
+    sendRaw = collBefore;
+  } else {
+    sendRaw = parseUnits(String(amount), COLL_DEC);
+  }
+  if (sendRaw <= 0n) {
+    return { ok: false, ...R, reason: 'zero_amount',
+      detail: amount === 'max' ? 'tUSDC balance is zero — nothing to withdraw.' : `amount=${amount} resolves to zero.` };
+  }
+  if (sendRaw > collBefore) {
+    return { ok: false, ...R, reason: 'insufficient_balance',
+      detail: `Requested ${formatUnits(sendRaw, COLL_DEC)} tUSDC exceeds balance ${formatUnits(collBefore, COLL_DEC)} tUSDC. Pass amount:"max" to withdraw the full balance.` };
+  }
+
+  const data = encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [to_address, sendRaw] });
+  const somiBal = await pc.getBalance({ address: owner.address });
+  const gasEstimate = await pc.estimateGas(
+    { account: owner.address, to: COLL, data }).catch(() => 65000n); // fallback only if estimation itself fails
+  const gasCost = gasEstimate * gasPrice;
+  if (somiBal < gasCost) {
+    return { ok: false, ...R, reason: 'insufficient_gas',
+      detail: `This wallet holds ${formatUnits(somiBal, 18)} SOMI, below the estimated ${formatUnits(gasCost, 18)} SOMI needed to broadcast this specific withdrawal transaction (at maxFeePerGas ${formatUnits(gasPrice, 9)} gwei). tUSDC cannot pay for its own transfer's gas — fund this wallet with SOMI first.` };
+  }
+
+  await send(session_id, R.tx, 'withdraw_tUSDC', { to: COLL, data });
+  const collAfter = await pc.readContract(
+    { address: COLL, abi: erc20Abi, functionName: 'balanceOf', args: [owner.address] });
+  const t = R.tx.withdraw_tUSDC;
+  return { ok: true, ...R,
+    amountSent: formatUnits(sendRaw, COLL_DEC),
+    balanceBefore: formatUnits(collBefore, COLL_DEC), balanceAfter: formatUnits(collAfter, COLL_DEC),
+    confirmedBy: 'transaction receipt status + ERC20 balance delta',
+    tx: { hash: t.hash, status: t.status, block: t.block, gasUsed: t.gasUsed } };
+}
+
+/** withdraw + one trade-log entry. A thrown error is logged and re-thrown unchanged. */
+export async function withdraw(input = {}) {
+  const session_id = input.session_id ?? input.sessionId ?? null;
+  const to_address = input.to_address ?? input.toAddress ?? null;
+  let res;
+  try {
+    res = await withdraw_inner({ session_id, to_address, asset: input.asset, amount: input.amount ?? 'max' });
+  } catch (e) {
+    const msg = e.shortMessage ?? e.message;
+    recordWithdrawal({ session_id, input, res: null, thrown: msg });
+    throw e;
+  }
+  const logged = recordWithdrawal({ session_id, input, res });
+  return { ...res, tradeLog: logged.ok
+    ? { recorded: true, seq: logged.seq, sessionId: logged.sessionId,
+        note: 'This outcome is in the append-only trade log. Read it with get_trade_log.' }
+    : { recorded: false, error: logged.error, note: logged.note } };
 }
 
 // ============================================================================
@@ -982,7 +1222,24 @@ export async function get_wallet_balance({ session_id = null, address = null } =
 
   // Both are required to trade, for different reasons, so report them separately
   // rather than as one "funded" boolean.
-  const canPayGas = somiRaw > 0n;
+  //
+  // canPayGas is a REAL floor, not "greater than zero." A wallet can hold
+  // dust-level SOMI (e.g. 0.0000252, observed live in this session after a
+  // withdraw drained it) that is nonzero but nowhere near enough to broadcast
+  // anything — the previous `somiRaw > 0n` check reported that wallet as
+  // "ready," which was false. GAS_FLOOR_UNITS is sized off this session's own
+  // real gasUsed figures: a single order placement or redemption leg (once
+  // approved) runs ~470-490k gas; setting the floor there means "can plausibly
+  // attempt ONE typical operation," not a guarantee for every operation
+  // (a first-time approval adds ~260k more, and this floor does not budget for
+  // that). This is a readiness SIGNAL for the caller to act on before trying,
+  // not a gate — the tools themselves (withdraw, place_order) run their own
+  // real estimateGas() against the specific call before ever broadcasting.
+  const GAS_FLOOR_UNITS = 300_000n;
+  const fees = await pc.estimateFeesPerGas().catch(() => null);
+  const gasPriceForFloor = fees?.maxFeePerGas ?? await pc.getGasPrice().catch(() => 0n);
+  const minSomiForGasRaw = GAS_FLOOR_UNITS * gasPriceForFloor;
+  const canPayGas = somiRaw >= minSomiForGasRaw;
   const hasCollateral = usdcRaw > 0n;
 
   // --- DEPOSIT LOGGING, by observation. AgentRail has no deposit tool by design
@@ -1013,8 +1270,10 @@ export async function get_wallet_balance({ session_id = null, address = null } =
       hasCollateral, canPayGas,
       readyToTrade: hasCollateral && canPayGas,
       blockedBy: hasCollateral && canPayGas ? null
-        : [...(hasCollateral ? [] : ['no tUSDC collateral']), ...(canPayGas ? [] : ['no SOMI for gas'])],
-      note: 'tUSDC and SOMI are BOTH required and are not interchangeable: tUSDC is the collateral an order spends, SOMI pays gas to broadcast it. A wallet with collateral but no SOMI cannot place an order at all.',
+        : [...(hasCollateral ? [] : ['no tUSDC collateral']), ...(canPayGas ? [] : ['SOMI balance below the estimated gas floor for one typical operation'])],
+      gasFloor: { estimatedMinSomi: formatUnits(minSomiForGasRaw, SOMI_DEC),
+        basis: `${GAS_FLOOR_UNITS} gas units × current maxFeePerGas — sized off this session's own observed order/redeem gas costs (~470-490k once already approved); does not budget for a first-time approval, which adds ~260k more` },
+      note: 'tUSDC and SOMI are BOTH required and are not interchangeable: tUSDC is the collateral an order spends, SOMI pays gas to broadcast it. canPayGas checks against a real gas-cost floor, not merely a nonzero balance — this is a readiness signal, not a guarantee; each tool re-checks gas against its own actual call before broadcasting.',
     },
     confirmedBy: 'direct on-chain reads (eth_getBalance + ERC20 balanceOf) at call time — not an indexer, so a deposit shows as soon as it is mined',
   };

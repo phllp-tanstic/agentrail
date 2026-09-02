@@ -8,6 +8,16 @@ node_modules/
 build/.wallet-store.json
 *.wallet-store.json
 
+# Migration/rotation backups of the wallet store. The pre-migration backup is
+# PLAINTEXT PRIVATE KEYS; the pre-rotation backup is encrypted but under a key
+# that may since have been exposed elsewhere. Both must never be committed —
+# the pattern above (*.wallet-store.json) does NOT match these, since they
+# have extra suffix after .json, which is exactly the gap that let them show
+# as untracked instead of ignored. Never assume a glob covers a variant
+# filename — verify with `git check-ignore -v` before trusting it, especially
+# for anything holding key material.
+*.wallet-store.json.*
+
 # Trade log — a user's real trading history (addresses, sizes, fills, payouts).
 # No key material, but it is per-user activity data and does not belong in git.
 .trade-log/

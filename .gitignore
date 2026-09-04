@@ -23,3 +23,14 @@ build/.wallet-store.json
 .trade-log/
 build/.trade-log/
 *.jsonl
+
+# Accounts store — API-key HASHES (not the keys themselves, salted SHA-256,
+# not reversible), but still not repo material: a leaked store lets someone
+# confirm which session_ids exist even though it can't forge a working key.
+# Covering the exact filename AND any future backup-variant suffix from day
+# one this time — *.wallet-store.json's narrow match was a real gap found and
+# fixed only after the fact; not repeating that mistake here.
+.accounts-store.json
+build/.accounts-store.json
+*.accounts-store.json
+*.accounts-store.json.*

@@ -70,6 +70,8 @@ server.registerTool('place_order', {
       .describe('Asserted against the market\'s actual intervalSec; a mismatch is refused.'),
     session_id: z.string()
       .describe('REQUIRED. Identifies which dedicated wallet signs and funds this order — the caller\'s own wallet from generate_wallet, not a shared key. Also the trade-log history this order is recorded under. There is no default and no shared fallback wallet; a session_id with no wallet yet is refused.'),
+    api_key: z.string()
+      .describe('REQUIRED. Proves ownership of session_id — from create_account. Every write tool now requires this alongside session_id; session_id alone is not proof of identity.'),
   },
 }, wrap(core.place_order));
 
@@ -80,6 +82,8 @@ server.registerTool('get_position', {
     market_id: z.string().describe('marketId to inspect.'),
     session_id: z.string()
       .describe('REQUIRED. Whose dedicated wallet to read the position from — a position is scoped to one wallet, and there is no shared wallet this could otherwise mean.'),
+    api_key: z.string()
+      .describe('REQUIRED. Proves ownership of session_id — from create_account.'),
   },
 }, wrap(core.get_position));
 
@@ -93,6 +97,8 @@ server.registerTool('redeem', {
       .describe('Run discovery and the guard, report what would happen, broadcast nothing.'),
     session_id: z.string()
       .describe('REQUIRED. Identifies which dedicated wallet\'s positions to redeem and sign the redemption with, and which trade-log history each leg is recorded under. Every leg gets its own entry, so a guard BLOCK is logged separately from any payout.'),
+    api_key: z.string()
+      .describe('REQUIRED. Proves ownership of session_id — from create_account.'),
   },
 }, wrap(core.redeem));
 
@@ -102,6 +108,8 @@ server.registerTool('withdraw', {
   inputSchema: {
     session_id: z.string()
       .describe('REQUIRED. Identifies which dedicated wallet the funds leave from and sign with.'),
+    api_key: z.string()
+      .describe('REQUIRED. Proves ownership of session_id — from create_account.'),
     to_address: z.string()
       .describe('REQUIRED. Destination 0x address. No default, no implicit sweep target — always explicit.'),
     asset: z.enum(['tUSDC', 'SOMI'])
@@ -111,11 +119,31 @@ server.registerTool('withdraw', {
   },
 }, wrap(core.withdraw));
 
+server.registerTool('create_account', {
+  title: 'Create an authenticated account for a new session (call this FIRST)',
+  description: `Generates a real api_key for a session_id and returns it EXACTLY ONCE — it cannot be recovered later, only its hash is stored (use rotate_api_key if lost). This must be the FIRST call for any new session, before generate_wallet: every write tool (generate_wallet, place_order, redeem, withdraw) and the session_id path of get_position/get_wallet_balance now require api_key alongside session_id. Before this existed, session_id was a bare client-supplied string with zero verification — anyone could claim any session_id. REFUSES if an account already exists for this session_id rather than silently reissuing.`,
+  inputSchema: {
+    session_id: z.string().describe('New identifier to create an account under. Must not already have one.'),
+    label: z.string().optional().describe('Optional human-readable note.'),
+  },
+}, wrap(core.create_account));
+
+server.registerTool('rotate_api_key', {
+  title: 'Replace a session\'s api_key (requires proving the current one)',
+  description: 'Issues a NEW api_key for a session, returned exactly once. Requires current_api_key — rotation without proof of the existing key would itself be an account-takeover path. The old key stops working the instant this succeeds.',
+  inputSchema: {
+    session_id: z.string().describe('Session whose key is being rotated.'),
+    current_api_key: z.string().describe('The EXISTING api_key. Required to prove ownership before issuing a new one.'),
+  },
+}, wrap(core.rotate_api_key));
+
 server.registerTool('generate_wallet', {
   title: 'Create a purpose-only dedicated wallet for a session',
-  description: `Generates a fresh keypair for a session and returns ONLY the address — the private key is never returned to the caller and stays server-side. Per the spec's custody model, a user funds this purpose-only wallet with what they intend to trade instead of exposing a main wallet, so the blast radius is bounded by the deposit. IDEMPOTENT: calling twice for the same session_id returns the FIRST wallet with created:false rather than generating a second one, because rotating an address that may already hold a deposit would strand those funds. CUSTODY, stated plainly: this is a CUSTODIAL model — AgentRail holds the key and CAN move these funds. That is a DIFFERENT model from the operator-delegation design, where the operator key is scoped on-chain and architecturally cannot move funds; do not describe this wallet as non-custodial. Keys are plaintext JSON on local disk with no encryption and no recovery path. This wallet is what place_order, redeem, and withdraw all sign with for this session_id — it is not an inert deposit address.`,
+  description: `Generates a fresh keypair for a session and returns ONLY the address — the private key is never returned to the caller and stays server-side. Per the spec's custody model, a user funds this purpose-only wallet with what they intend to trade instead of exposing a main wallet, so the blast radius is bounded by the deposit. IDEMPOTENT: calling twice for the same session_id returns the FIRST wallet with created:false rather than generating a second one, because rotating an address that may already hold a deposit would strand those funds. CUSTODY, stated plainly: this is a CUSTODIAL model — AgentRail holds the key and CAN move these funds. That is a DIFFERENT model from the operator-delegation design, where the operator key is scoped on-chain and architecturally cannot move funds; do not describe this wallet as non-custodial. Keys are encrypted at rest (AES-256-GCM) — NOT a KMS/HSM-backed signing path, where key material would never enter this process at all; that is a further target, not yet built. This wallet is what place_order, redeem, and withdraw all sign with for this session_id — it is not an inert deposit address. Requires an account (create_account) first.`,
   inputSchema: {
     session_id: z.string().describe('Identifier the wallet is stored under and looked up by later. Required, non-empty.'),
+    api_key: z.string()
+      .describe('REQUIRED. Proves ownership of session_id — from create_account. Called before this wallet can be created at all.'),
     label: z.string().optional().describe('Optional human-readable note stored alongside the address.'),
     force_new: z.boolean().default(false)
       .describe('Generate a replacement keypair even though one exists for this session_id. The previous record is retained server-side under a suffixed key rather than deleted, but is no longer reachable by this session_id. Only pass true if you accept that.'),
@@ -126,8 +154,10 @@ server.registerTool('get_wallet_balance', {
   title: 'Check tUSDC and SOMI balance for a wallet',
   description: `Direct on-chain reads (eth_getBalance + ERC20 balanceOf) of a generated wallet's collateral and gas balances, so a caller can confirm a deposit landed BEFORE attempting to trade. Not an indexer read, so a deposit appears as soon as it is mined. Accepts either session_id (resolved through the wallet store) or a raw address; an address not in the store is still reported, since these are public reads, but flagged known:false because AgentRail holds no key for it. Reports tUSDC and SOMI SEPARATELY and does not collapse them into one "funded" flag: tUSDC is the collateral an order spends and SOMI pays the gas to broadcast it, so a wallet holding collateral but no SOMI cannot place an order at all.`,
   inputSchema: {
-    session_id: z.string().optional().describe('Session whose wallet to check. Either this or address is required.'),
-    address: z.string().optional().describe('Raw 0x address to check. Either this or session_id is required.'),
+    session_id: z.string().optional().describe('Session whose wallet to check. Either this or address is required. If used, api_key is REQUIRED alongside it.'),
+    address: z.string().optional().describe('Raw 0x address to check. Either this or session_id is required. Public on-chain data — no api_key needed for this path.'),
+    api_key: z.string().optional()
+      .describe('REQUIRED if session_id is used (proves ownership). Not needed for the raw-address path.'),
   },
 }, wrap(core.get_wallet_balance));
 

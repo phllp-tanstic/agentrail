@@ -36,6 +36,8 @@ import { checkPreOrder, commitReservation, releaseReservation, recordSpend,
 // does not create.
 import { list_wallets as walletList, generate_wallet as walletGenerate,
   _privateKeyForSession, CUSTODY_DISCLOSURE } from './wallet.mjs';
+import { requireApiKey, create_account as accountsCreate, rotate_api_key as accountsRotate,
+  list_accounts as accountsList } from './accounts.mjs';
 import { normalizeIntent as normalizeIntentLocal,
   normalizeMinSecondsToExpiry as normalizeRunwayLocal } from './intent.mjs';
 import { recordOrder, recordRedeem, recordWallet, recordBalanceObservation,
@@ -330,12 +332,21 @@ async function place_order_inner(input = {}) {
     market_id, direction = 'YES', cross_ticks = 20, window_seconds = 300,
   } = input;
   const session_id = input.session_id ?? input.sessionId ?? null;
+  const api_key = input.api_key ?? input.apiKey ?? null;
   // Accept both the camelCase names Phase C specified and snake_case matching the
   // existing tool surface, so either spelling works from any caller.
   const targetDollarAmount = input.targetDollarAmount ?? input.target_dollar_amount ?? null;
   const SLIP = resolveMaxSlippagePct(input.maxSlippagePct ?? input.max_slippage_pct ?? 5);
   const maxSlippagePct = SLIP.maxSlippagePct;
   const stakeUnitsIn = input.stake_units ?? input.stakeUnits ?? null;
+
+  // AUTHENTICATION — the very first check, before session_id's own shape is
+  // even validated below. requireApiKey THROWS on failure (accounts.mjs), and
+  // this function's caller (place_order, further down) already catches and
+  // logs any thrown error before re-throwing — so a failed auth attempt lands
+  // in the trade log as a real event, same as any other refusal, rather than
+  // silently vanishing before logging ever sees it.
+  requireApiKey(session_id, api_key);
 
   // PER-SESSION CUSTODY: this is now a required argument, not just a logging
   // tag. It selects WHICH wallet signs. Refusing here — rather than at ctx()
@@ -872,8 +883,10 @@ export async function place_order(input = {}) {
 // TOOL 3 — get_position
 // ERC6909 balance for both outcome token ids + the market's on-chain status.
 // ============================================================================
-export async function get_position({ market_id, session_id = null, sessionId = null } = {}) {
+export async function get_position({ market_id, session_id = null, sessionId = null, api_key = null, apiKey = null } = {}) {
   const sid = session_id ?? sessionId ?? null;
+  const key = api_key ?? apiKey ?? null;
+  requireApiKey(sid, key);
   if (!market_id) return { ok: false, refused: true, reason: 'market_id is required.' };
   if (!sid) {
     return { ok: false, refused: true, reason: 'session_id_required',
@@ -918,7 +931,8 @@ export async function get_position({ market_id, session_id = null, sessionId = n
 // logged exactly as prominently as a payout — that asymmetry is the whole trust
 // story, since a refused redemption is what PRESERVED value here.
 // ============================================================================
-async function redeem_inner({ market_id = null, dry_run = false, session_id = null } = {}) {
+async function redeem_inner({ market_id = null, dry_run = false, session_id = null, api_key = null } = {}) {
+  requireApiKey(session_id, api_key);
   if (!session_id) {
     return { ok: false, refused: true, reason: 'session_id_required',
       detail: 'session_id is required. Redemption burns outcome tokens held by one session\'s own dedicated wallet and pays collateral into that same wallet — there is no shared wallet this could otherwise apply to.' };
@@ -1042,11 +1056,12 @@ const stripM = ({ m, ...rest }) => ({ ...rest, amount: String(rest.amount) });
 
 /** redeem + one trade-log entry per leg. Thrown errors are logged and re-thrown. */
 export async function redeem({ market_id = null, dry_run = false, session_id = null,
-  sessionId = null } = {}) {
+  sessionId = null, api_key = null, apiKey = null } = {}) {
   const sid = session_id ?? sessionId ?? null;
+  const key = api_key ?? apiKey ?? null;
   let res;
   try {
-    res = await redeem_inner({ market_id, dry_run, session_id: sid });
+    res = await redeem_inner({ market_id, dry_run, session_id: sid, api_key: key });
   } catch (e) {
     const msg = e.shortMessage ?? e.message;
     recordRedeem({ session_id: sid, res: null, dry_run, thrown: msg });
@@ -1090,7 +1105,8 @@ export async function redeem({ market_id = null, dry_run = false, session_id = n
 // "max" on tUSDC withdraws the entire ERC20 balance, since tUSDC itself
 // carries no gas cost to hold at zero.
 // ============================================================================
-async function withdraw_inner({ session_id = null, to_address = null, asset = null, amount = null } = {}) {
+async function withdraw_inner({ session_id = null, api_key = null, to_address = null, asset = null, amount = null } = {}) {
+  requireApiKey(session_id, api_key);
   if (!session_id) {
     return { ok: false, refused: true, reason: 'session_id_required',
       detail: 'session_id is required — it identifies which dedicated wallet the funds leave from. There is no shared or default wallet.' };
@@ -1205,10 +1221,11 @@ async function withdraw_inner({ session_id = null, to_address = null, asset = nu
 /** withdraw + one trade-log entry. A thrown error is logged and re-thrown unchanged. */
 export async function withdraw(input = {}) {
   const session_id = input.session_id ?? input.sessionId ?? null;
+  const api_key = input.api_key ?? input.apiKey ?? null;
   const to_address = input.to_address ?? input.toAddress ?? null;
   let res;
   try {
-    res = await withdraw_inner({ session_id, to_address, asset: input.asset, amount: input.amount ?? 'max' });
+    res = await withdraw_inner({ session_id, api_key, to_address, asset: input.asset, amount: input.amount ?? 'max' });
   } catch (e) {
     const msg = e.shortMessage ?? e.message;
     recordWithdrawal({ session_id, input, res: null, thrown: msg });
@@ -1220,6 +1237,20 @@ export async function withdraw(input = {}) {
         note: 'This outcome is in the append-only trade log. Read it with get_trade_log.' }
     : { recorded: false, error: logged.error, note: logged.note } };
 }
+
+// ============================================================================
+// TOOL 0 — create_account / rotate_api_key / list_accounts
+// (re-exported from ./accounts.mjs, no chain access)
+//
+// MUST be the first call for any new session, before generate_wallet. Every
+// write-capable tool from here on (generate_wallet, place_order, redeem,
+// withdraw) and the session_id path of get_position/get_wallet_balance now
+// require api_key alongside session_id. Before this, session_id was a bare
+// client-supplied string with zero verification — this closes that gap.
+// ============================================================================
+export const create_account = accountsCreate;
+export const rotate_api_key = accountsRotate;
+export const list_accounts = accountsList;
 
 // ============================================================================
 // TOOL 5 — generate_wallet  (re-exported from ./wallet.mjs, no chain access)
@@ -1239,7 +1270,8 @@ export { list_wallets, STORE_PATH } from './wallet.mjs';
 export { get_trade_log, TRADE_LOG_DIR, DEFAULT_SESSION_ID } from './trade-log.mjs';
 
 /** generate_wallet + a trade-log entry. Creation AND the idempotent no-op are logged. */
-export function generate_wallet({ session_id, label = null, force_new = false } = {}) {
+export function generate_wallet({ session_id, api_key, label = null, force_new = false } = {}) {
+  requireApiKey(session_id, api_key);
   const res = walletGenerate({ session_id, label, force_new });
   // Key the log entry to the SAME session id the wallet is stored under, so a
   // wallet and the orders placed for that session land in one history.
@@ -1260,11 +1292,16 @@ const SOMI_DEC = 18;   // native gas token
  * public reads — but flagged `known: false` so a caller cannot mistake an
  * arbitrary address for one AgentRail can sign for.
  */
-export async function get_wallet_balance({ session_id = null, address = null } = {}) {
+export async function get_wallet_balance({ session_id = null, api_key = null, apiKey = null, address = null } = {}) {
   if (!session_id && !address) {
     return { ok: false, refused: true, reason: 'session_id_or_address_required',
       detail: 'Pass either session_id (resolved through the wallet store) or a raw address.' };
   }
+  // Auth only applies to the session_id path — it reveals the session->address
+  // mapping plus richer readiness/tradeLog metadata. The raw-address path is
+  // just a public on-chain balance read for an address the caller already
+  // knows, no session-specific information involved, so it stays open.
+  if (session_id) requireApiKey(session_id, api_key ?? apiKey ?? null);
 
   let resolved = address, known = false, record = null;
   if (session_id) {

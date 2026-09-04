@@ -54,7 +54,7 @@ const MODULE = '0x3ecC694Cef705358864a646142ac17A90E29e388';        // binaryMar
 const COLL_DEC = 6;                                                 // tUSDC on testnet
 
 // Scope fences, enforced not documented.
-export const ALLOWED_DIRECTIONS = ['YES'];
+export const ALLOWED_DIRECTIONS = ['YES', 'NO'];
 export const ALLOWED_WINDOWS = [300];
 
 // Defence-in-depth ceiling on maxSlippagePct. This parameter stays
@@ -243,8 +243,11 @@ async function findMarket(marketId) {
 // ============================================================================
 // TOOL 1 — list_markets
 // Status-gated (getMarketOnchain().status === Trading) live 300s windows, with
-// real resting YES-side ask depth reported per market. Depth IS cheaply
-// checkable (one getBinaryOrderBook per candidate), so it is checked.
+// real resting YES-book depth reported per market on BOTH crossing sides:
+// yesAsks (what a YES buy crosses) and yesBids (real BUY_YES resting orders —
+// what a NO buy crosses via mint-a-pair). Both come from the SAME one-shot
+// getBinaryOrderBook read per candidate — no second read. Depth IS cheaply
+// checkable, so it is checked.
 // Wraps part3-win-proof.mjs pickYesMarket() + the status gate.
 // ============================================================================
 export async function list_markets({ window_seconds = 300, require_yes_liquidity = true,
@@ -263,11 +266,18 @@ export async function list_markets({ window_seconds = 300, require_yes_liquidity
     const T = Number(m.expiry) - now;
     if (T < min_seconds_to_expiry || T > max_seconds_to_expiry) { skipped.outsideTimeWindow++; continue; }
 
-    // real resting YES-side ask depth (the side proven to fill)
+    // Real resting YES-book depth on BOTH crossing sides, from the SAME single
+    // getBinaryOrderBook read — yesAsks (the side a YES buy crosses; the side
+    // proven to fill) and yesBids (real BUY_YES orders — the side a NO buy
+    // crosses via mint-a-pair; the SDK itself reads yesBids[0] as bestBid, and
+    // place_order's NO path reads this same array). The noBids/noAsks arrays on
+    // the same response are an arithmetic mirror — deliberately not read here.
     let ob = null;
     try { ob = await ex.client.getBinaryOrderBook(m.poolAddress); } catch { /* treat as no depth */ }
     const yesAsks = ob?.yesAsks ?? [];
     const depth = yesAsks.reduce((a, l) => a + BigInt(l.quantity), 0n);
+    const yesBids = ob?.yesBids ?? [];
+    const bidDepth = yesBids.reduce((a, l) => a + BigInt(l.quantity), 0n);
     if (require_yes_liquidity && depth === 0n) { skipped.noYesDepth++; continue; }
 
     // on-chain status gate — the single most avoidable live failure (spec §3)
@@ -283,13 +293,16 @@ export async function list_markets({ window_seconds = 300, require_yes_liquidity
       yesAskDepthUnits: formatUnits(depth, DEC), yesAskDepthRaw: String(depth),
       bestYesAsk: yesAsks[0] ? String(yesAsks[0].price) : null,
       bestYesAskProb: yesAsks[0] ? formatUnits(BigInt(yesAsks[0].price), DEC) : null,
+      yesBidDepthUnits: formatUnits(bidDepth, DEC), yesBidDepthRaw: String(bidDepth),
+      bestYesBid: yesBids[0] ? String(yesBids[0].price) : null,
+      bestYesBidProb: yesBids[0] ? formatUnits(BigInt(yesBids[0].price), DEC) : null,
       quoteDecimals: DEC, yesTokenId: String(m.yesTokenId), noTokenId: String(m.noTokenId),
     });
   }
   out.sort((a, b) => a.secondsToExpiry - b.secondsToExpiry); // soonest settlement first
   return { ok: true, scope: { direction: 'YES only', windowSeconds: Number(window_seconds) },
     liveMarketsSeen: live.length, tradeable: out.length, markets: out, skipped,
-    note: 'Depth shown is real resting yesAsks only. The NO arrays returned by getBinaryOrderBook are an arithmetic mirror of the YES book and would double-count liquidity (PROOF-LOG RUN 3 PART 2).' };
+    note: 'Depth shown is real resting YES-book liquidity on BOTH crossing sides, read from the pool\'s single YES-terms book via ONE getBinaryOrderBook call per market: yesAsks (what a YES order crosses) and yesBids (real BUY_YES orders — what a NO order crosses via mint-a-pair). The noBids/noAsks arrays in the same response are an arithmetic mirror of yesAsks/yesBids and would double-count liquidity, so they are not reported (PROOF-LOG RUN 3 PART 2; research/NO-side-fill-paths.md §6).' };
 }
 
 // ============================================================================
@@ -336,7 +349,7 @@ async function place_order_inner(input = {}) {
   const dir = String(direction).toUpperCase();
   if (!ALLOWED_DIRECTIONS.includes(dir)) {
     return { ok: false, refused: true, reason: 'direction_out_of_scope',
-      detail: `direction=${dir} is out of proven scope. Only YES is supported. A BUY_NO has never filled at any expressible price across two runs (0.58 and 0.999, byte-identical gas), and the cause is undetermined — logged, not root-caused (PROOF-LOG RUN 2 / RUN 3 PART 2).` };
+      detail: `direction=${dir} is out of proven scope. Supported: ${ALLOWED_DIRECTIONS.join(', ')}.` };
   }
   if (!ALLOWED_WINDOWS.includes(Number(window_seconds))) {
     return { ok: false, refused: true, reason: 'window_out_of_scope',
@@ -431,17 +444,31 @@ async function place_order_inner(input = {}) {
         detail: `status gate CLOSED (status=${onchain.status}) — refusing to submit into a window already closed on-chain.` };
     }
 
-    // --- REFERENCE read: the book as it stands when we size the order
+    // --- REFERENCE read: the book as it stands when we size the order.
+    //
+    // DIRECTION-DEPENDENT SIDE OF THE BOOK, deliberately:
+    //   YES buy crosses resting SELLERS (yesAsks) — bid ABOVE the best ask.
+    //   NO buy fills via mint-a-pair against a resting BUY_YES (yesBids) — the
+    //   crossing rule, confirmed from real decoded fills in
+    //   research/NO-side-fill-paths.md §11c, is yourPrice(YES-terms) <=
+    //   theirBidPrice. So a NO order reads yesBids and must price AT OR BELOW
+    //   the best resting bid, not above anything. There is no separate "NO
+    //   book" on-chain — noBids/noAsks returned by the SDK are an inverted
+    //   mirror of yesAsks/yesBids (PROOF-LOG RUN 3 PART 2, independently
+    //   confirmed again in the NO-side report §6) — so this reads the real,
+    //   non-mirrored side directly rather than trusting the derived one.
     const obRef = await ex.client.getBinaryOrderBook(M.poolAddress).catch(() => null);
-    const asksRef = obRef?.yesAsks ?? [];
-    if (!asksRef.length) {
+    const bookSideRef = dir === 'YES' ? (obRef?.yesAsks ?? []) : (obRef?.yesBids ?? []);
+    if (!bookSideRef.length) {
       R.attempts.push(AT);
       release('no resting liquidity on a retry attempt — the book emptied between attempts');
       return { ok: false, ...R, reason: 'no_resting_liquidity',
-        detail: 'no resting yesAsks on this market — nothing to cross. Pick a market from list_markets with non-zero yesAskDepthUnits.' };
+        detail: dir === 'YES'
+          ? 'no resting yesAsks on this market — nothing to cross. Pick a market from list_markets with non-zero yesAskDepthUnits.'
+          : 'no resting yesBids on this market — nothing for a NO order to mint-a-pair against. A NO order needs a real BUY_YES resting on the book; check the book depth before placing.' };
     }
-    const referencePrice = BigInt(asksRef[0].price);
-    const depth = asksRef.reduce((a, l) => a + BigInt(l.quantity), 0n);
+    const referencePrice = BigInt(bookSideRef[0].price);
+    const depth = bookSideRef.reduce((a, l) => a + BigInt(l.quantity), 0n);
 
     // --- quantity
     // NOTE ON TICK-SNAPPING QUANTITY, deliberately NOT done: snapPriceToTick()
@@ -452,17 +479,27 @@ async function place_order_inner(input = {}) {
     // `tickSize`, so quantity is rounded to a minQuantity multiple here. The
     // PRICE still goes through the shared tick-snapper, unchanged.
     let QTY, sizing;
+    // Cost-per-unit differs by direction: YES escrows qty*price, NO escrows
+    // qty*(ONE-price) (confirmed on-chain via real BUY_NO escrow decode,
+    // research/NO-side-fill-paths.md §5/§11b). Sizing here uses the REFERENCE
+    // price as an approximation — the actual crossing price (computed below)
+    // will differ slightly, which is exactly why dollarSizing variance is
+    // reported rather than assumed further down.
+    const refCostPerUnit = dir === 'YES' ? referencePrice : (ONE - referencePrice);
     if (sizingMode === 'DOLLAR') {
       const targetRaw = exactToRaw(String(targetDollarAmount), DEC);
-      const rawQty = (targetRaw * ONE) / referencePrice;      // qty = $ / price
-      QTY = ((rawQty + minQ / 2n) / minQ) * minQ;             // -> minQuantity grid
+      const rawQty = (targetRaw * ONE) / refCostPerUnit;        // qty = $ / cost-per-unit
+      QTY = ((rawQty + minQ / 2n) / minQ) * minQ;               // -> minQuantity grid
       if (QTY < minQ) QTY = minQ;
       sizing = { mode: 'DOLLAR', targetDollarAmount: Number(targetDollarAmount),
         referencePrice: String(referencePrice), referencePriceProb: formatUnits(referencePrice, DEC),
+        referenceCostPerUnit: String(refCostPerUnit), referenceCostPerUnitProb: formatUnits(refCostPerUnit, DEC),
         impliedQuantityRaw: String(rawQty), quantityRaw: String(QTY),
         quantityUnits: formatUnits(QTY, DEC), minQuantity: String(minQ),
         roundedToMinQuantityGrid: true,
-        note: 'Quantity is derived as targetDollarAmount / referencePrice, then rounded to a minQuantity multiple. Quantity is NOT run through the price tick-snapper — that function clamps into a probability band and would corrupt sizes above 1.0 unit.' };
+        note: dir === 'YES'
+          ? 'Quantity is derived as targetDollarAmount / referencePrice, then rounded to a minQuantity multiple. Quantity is NOT run through the price tick-snapper — that function clamps into a probability band and would corrupt sizes above 1.0 unit.'
+          : 'NO escrows qty*(ONE-price), not qty*price — quantity here is targetDollarAmount / (ONE - referencePrice), then rounded to a minQuantity multiple. Quantity is NOT run through the price tick-snapper.' };
     } else {
       const unit = minQ * 1000n;                              // proven Phase A unit
       QTY = (BigInt(Math.round(Number(stakeUnits) * 1000)) * unit) / 1000n;
@@ -479,21 +516,44 @@ async function place_order_inner(input = {}) {
     AT.sizing = sizing;
 
     // --- price snap via the SHARED module (build/tick-snap.mjs) — not reimplemented
-    const bidYes = snapPriceToTick(formatUnits(referencePrice + BigInt(cross_ticks) * tick, DEC), tick, DEC);
-    AT.book = { bestYesAsk: String(referencePrice), bestYesAskProb: formatUnits(referencePrice, DEC),
-      yesAskDepthUnits: formatUnits(depth, DEC), tickSize: String(tick) };
-    AT.priceSnap = { crossTicks: Number(cross_ticks), snappedBid: String(bidYes),
-      snappedBidProb: formatUnits(bidYes, DEC), onTick: isOnTick(bidYes, tick),
-      ceilingHit: bidYes === ONE - tick };
+    //
+    // DIRECTION-DEPENDENT CROSSING DIRECTION:
+    //   YES: bid ABOVE the best resting ask (referencePrice + cross_ticks) to
+    //   guarantee a cross, paying a small premium for fill certainty.
+    //   NO: the crossing rule (research/NO-side-fill-paths.md §11c, inferred
+    //   from 6 decoded real fills, NOT read from verified source — see that
+    //   report's §7 item 1 for the one remaining open question, the exact
+    //   boundary) is yourPrice <= theirBidPrice. So NO must price AT OR BELOW
+    //   the best resting yesBid to guarantee a cross — subtracting cross_ticks
+    //   moves the price DOWN, mirroring the same "premium for certainty"
+    //   concept applied to the opposite side of the book.
+    const crossPrice = dir === 'YES'
+      ? snapPriceToTick(formatUnits(referencePrice + BigInt(cross_ticks) * tick, DEC), tick, DEC)
+      : snapPriceToTick(formatUnits(referencePrice - BigInt(cross_ticks) * tick, DEC), tick, DEC);
+    const bidYes = crossPrice; // kept for structural symmetry with existing var name below
+    AT.book = { bestPrice: String(referencePrice), bestPriceProb: formatUnits(referencePrice, DEC),
+      bestPriceSide: dir === 'YES' ? 'yesAsks' : 'yesBids',
+      depthUnits: formatUnits(depth, DEC), tickSize: String(tick) };
+    AT.priceSnap = { crossTicks: Number(cross_ticks), snappedPrice: String(crossPrice),
+      snappedPriceProb: formatUnits(crossPrice, DEC), onTick: isOnTick(crossPrice, tick),
+      ceilingHit: dir === 'YES' && crossPrice === ONE - tick,
+      floorHit: dir === 'NO' && crossPrice === tick };
 
     // Worst case: we pay our own limit. Phase B observed exactly this (rested,
     // then taken at our limit), so the risk check uses this, not the ask.
-    const worstCaseSpendRaw = (bidYes * QTY) / ONE;
+    // ESCROW FORMULA DIFFERS BY DIRECTION: YES escrows qty*price; NO escrows
+    // qty*(ONE-price) — confirmed on-chain via real BUY_NO escrow decode
+    // (research/NO-side-fill-paths.md §5). Using the YES formula for a NO
+    // order would silently compute the wrong worst-case spend and corrupt
+    // both the risk-guardrail check and the dollar-sizing report.
+    const costPerUnit = dir === 'YES' ? bidYes : (ONE - bidYes);
+    const worstCaseSpendRaw = (costPerUnit * QTY) / ONE;
     const worstCaseSpendUsd = toUsd(worstCaseSpendRaw);
     AT.spendEstimate = {
-      atReferencePriceUsd: toUsd((referencePrice * QTY) / ONE),
+      atReferencePriceUsd: toUsd((refCostPerUnit * QTY) / ONE),
       worstCaseAtOurLimitUsd: worstCaseSpendUsd,
-      note: 'worstCaseAtOurLimitUsd assumes we pay our own limit price, which is what Phase B observed when an order rested and was then taken. It is the figure the risk check uses.' };
+      note: 'worstCaseAtOurLimitUsd assumes we pay our own limit price, which is what Phase B observed when an order rested and was then taken. It is the figure the risk check uses.'
+        + (dir === 'NO' ? ' For NO, cost-per-unit is (ONE - price), not price — see the priceSnap/sizing notes.' : '') };
 
     // --- RISK GUARDRAILS — server-side, evaluated BEFORE any broadcast.
     // On approval this RESERVES the worst-case spend in the same synchronous step,
@@ -518,9 +578,10 @@ async function place_order_inner(input = {}) {
 
     // --- per-pool ERC20 allowance: recurs per window (proven runs 1 & 2)
     const expireNs = BigInt(M.expiry) * 1_000_000_000n;
+    const orderKind = dir === 'YES' ? SDK.ORDER_KIND.BUY_YES : SDK.ORDER_KIND.BUY_NO;
     const mkData = (price) => encodeFunctionData({
       abi: SDK.binaryPoolWriteAbi, functionName: 'placeBinaryOrder',
-      args: [SDK.ORDER_KIND.BUY_YES, price, QTY, expireNs, SDK.ORDER_TYPE.LIMIT,
+      args: [orderKind, price, QTY, expireNs, SDK.ORDER_TYPE.LIMIT,
         SDK.SELF_MATCHING_OPTION.CANCEL_TAKER, SDK.ZERO_ADDRESS, 0n, 0n],
     });
     let dYes = mkData(bidYes);
@@ -547,11 +608,19 @@ async function place_order_inner(input = {}) {
     // compare against the reference we sized against. The gap is real — the
     // allowance tx and the simulation both take seconds, and Phase B saw the
     // best ask move 497000 -> 212000 inside ~30s.
+    //
+    // ADVERSE DIRECTION DIFFERS BY SIDE: for YES, adverse = the ask RISING
+    // (costs more to cross). For NO, adverse = the resting bid FALLING — a
+    // lower yesBid means a lower fill price P_m, which INCREASES the NO
+    // taker's escrow (qty*(ONE-P_m)) and can also drop below the taker's own
+    // limit entirely, preventing a cross. The sign convention is intentionally
+    // inverted from the YES case below, not a copy-paste of it.
     const obNow = await ex.client.getBinaryOrderBook(M.poolAddress).catch(() => null);
-    const asksNow = obNow?.yesAsks ?? [];
-    const placementPrice = asksNow.length ? BigInt(asksNow[0].price) : referencePrice;
-    const slippagePct = referencePrice === 0n ? 0
+    const bookSideNow = dir === 'YES' ? (obNow?.yesAsks ?? []) : (obNow?.yesBids ?? []);
+    const placementPrice = bookSideNow.length ? BigInt(bookSideNow[0].price) : referencePrice;
+    const rawMovePct = referencePrice === 0n ? 0
       : (Number(placementPrice - referencePrice) / Number(referencePrice)) * 100;
+    const slippagePct = dir === 'YES' ? rawMovePct : -rawMovePct;
     AT.slippage = {
       referencePrice: String(referencePrice), placementPrice: String(placementPrice),
       slippagePct: Number(slippagePct.toFixed(4)), maxSlippagePct,
@@ -559,15 +628,18 @@ async function place_order_inner(input = {}) {
       clamped: SLIP.clamped, ...(SLIP.nonFiniteFallback ? { nonFiniteFallback: true } : {}),
       ...(SLIP.clampNote ? { clampNote: SLIP.clampNote } : {}),
       ceiling: SLIPPAGE_PCT_CEILING,
-      estimatedSpendAtPlacementPriceUsd: toUsd((placementPrice * QTY) / ONE),
+      estimatedSpendAtPlacementPriceUsd: toUsd(((dir === 'YES' ? placementPrice : (ONE - placementPrice)) * QTY) / ONE),
       enforced: sizingMode === 'DOLLAR',
-      basis: 'adverse movement of the best ask between the reference read (used for sizing) and the read immediately before broadcast. The deliberate cross_ticks premium is NOT counted as slippage — it is intended, and is reported separately as worstCaseAtOurLimitUsd.' };
+      basis: dir === 'YES'
+        ? 'adverse movement of the best ask between the reference read (used for sizing) and the read immediately before broadcast. The deliberate cross_ticks premium is NOT counted as slippage — it is intended, and is reported separately as worstCaseAtOurLimitUsd.'
+        : 'adverse movement of the best resting yesBid (falling, which increases NO escrow) between the reference read and the read immediately before broadcast. The deliberate cross_ticks discount is NOT counted as slippage — it is intended, and is reported separately as worstCaseAtOurLimitUsd.' };
 
     if (sizingMode === 'DOLLAR' && slippagePct > maxSlippagePct) {
       R.attempts.push(AT);
       release(`slippage guard refused the order (${slippagePct.toFixed(4)}% > ${maxSlippagePct}%) — nothing was broadcast`);
+      const estSpend = toUsd(((dir === 'YES' ? placementPrice : (ONE - placementPrice)) * QTY) / ONE);
       return { ok: false, refused: true, ...R, reason: 'slippage_exceeded',
-        detail: `best ask moved ${slippagePct.toFixed(4)}% (${referencePrice} -> ${placementPrice}) between sizing and placement, exceeding maxSlippagePct=${maxSlippagePct}. The quantity sized for $${targetDollarAmount} would now spend about $${toUsd((placementPrice * QTY) / ONE).toFixed(6)}. NOT broadcast.`,
+        detail: `the book moved ${slippagePct.toFixed(4)}% adversely (${referencePrice} -> ${placementPrice}) between sizing and placement, exceeding maxSlippagePct=${maxSlippagePct}. The quantity sized for $${targetDollarAmount} would now spend about $${estSpend.toFixed(6)}. NOT broadcast.`,
         riskStatus: riskSnapshot(session_id) };
     }
 
@@ -584,10 +656,16 @@ async function place_order_inner(input = {}) {
     // ------------------------------------------------------------- broadcast
     // TASK 1: a reverted broadcast is a NORMAL, state-dependent outcome — not an
     // exception. Return the same structured shape as every other failure path.
-    const yesBefore = await bal6909(session_id, M.yesTokenId), collBefore = await balColl(session_id);
+    //
+    // outcomeTokenId is direction-aware: YES fills mint/hold yesTokenId, NO
+    // fills mint/hold noTokenId — these are DIFFERENT ERC6909 ids on the same
+    // outcome-token contract, confirmed in the SDK's ORDER_KIND_SIDE mapping
+    // and market metadata (M.noTokenId).
+    const outcomeTokenId = dir === 'YES' ? M.yesTokenId : M.noTokenId;
+    const yesBefore = await bal6909(session_id, outcomeTokenId), collBefore = await balColl(session_id);
     let rcpt = null, sendError = null;
     try {
-      rcpt = await send(session_id, R.tx, `a${attempt}_placeBinaryOrder_BUY_YES`,
+      rcpt = await send(session_id, R.tx, `a${attempt}_placeBinaryOrder_BUY_${dir}`,
         { to: M.poolAddress, data: dYes }, { throwOnRevert: false });
     } catch (e) {
       sendError = e.shortMessage ?? e.message;
@@ -631,7 +709,7 @@ async function place_order_inner(input = {}) {
 
     // ------------------------------------------------- bounded fill resolution
     const tReceipt = Date.now();
-    const yesAtReceipt = await bal6909(session_id, M.yesTokenId), collAtReceipt = await balColl(session_id);
+    const yesAtReceipt = await bal6909(session_id, outcomeTokenId), collAtReceipt = await balColl(session_id);
 
     // A read taken immediately after the receipt is not a durable answer: an order
     // that rests is often taken seconds later by a maker crossing it. So
@@ -653,7 +731,7 @@ async function place_order_inner(input = {}) {
         // An order cannot fill once the window expires — stop rather than poll on.
         if (Math.floor(Date.now() / 1000) >= Number(M.expiry)) { stoppedReason = 'expiry'; break; }
         await new Promise((r) => setTimeout(r, POLL_EVERY_MS));
-        const b = await bal6909(session_id, M.yesTokenId).catch(() => null);
+        const b = await bal6909(session_id, outcomeTokenId).catch(() => null);
         const elapsed = Number(((Date.now() - tReceipt) / 1000).toFixed(1));
         observations.push({ atSeconds: elapsed, erc6909: b === null ? 'READ FAILED' : String(b) });
         if (b !== null && b > yesBefore) {
@@ -720,7 +798,7 @@ async function place_order_inner(input = {}) {
       };
     }
 
-    R.yesTokenId = String(M.yesTokenId); R.expiry = Number(M.expiry);
+    R.outcomeTokenId = String(outcomeTokenId); R.direction = dir; R.expiry = Number(M.expiry);
 
     // --- risk accounting: resolve the reservation into the REAL spend, releasing
     // the difference between the reserved worst case and what actually moved.

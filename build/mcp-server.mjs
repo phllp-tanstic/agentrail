@@ -34,16 +34,16 @@ const wrap = (fn) => async (args) => {
   }
 };
 
-const SCOPE = 'PROVEN SCOPE ONLY: single-sided YES bets on 300-second windows, via the self `placeBinaryOrder` path. NO-side orders, other window lengths, and the delegated operator path are refused — they are unproven or closed. Somnia Shannon testnet.';
+const SCOPE = 'PROVEN SCOPE: YES and NO directional bets on 300-second windows, via the self `placeBinaryOrder` path. NO fills via mint-a-pair against a resting BUY_YES — the exact crossing boundary is inferred from real on-chain fills, not read from verified pool source (research/NO-side-fill-paths.md §7 item 1); a direct NO-vs-NO cross has never been observed on this venue. Other window lengths and the delegated operator path are refused — they are unproven or closed. Somnia Shannon testnet.';
 
 server.registerTool('list_markets', {
   title: 'List tradeable DreamDEX event-contract windows',
-  description: `Live binary markets that are (a) 300-second windows, (b) OPEN on the on-chain status gate (getMarketOnchain().status === Trading), and (c) backed by real resting YES-side ask depth. Sorted soonest-settlement first. ${SCOPE}`,
+  description: `Live binary markets that are (a) 300-second windows, (b) OPEN on the on-chain status gate (getMarketOnchain().status === Trading), and (c) backed by real resting YES-side ask depth. Reports resting depth on BOTH crossing sides per market, from one order-book read: yesAskDepthUnits/yesAskDepthRaw/bestYesAsk/bestYesAskProb (the side a YES order crosses) AND yesBidDepthUnits/yesBidDepthRaw/bestYesBid/bestYesBidProb (real BUY_YES resting orders — the side a NO order crosses via mint-a-pair). A NO order needs non-zero yesBid depth to find liquidity; check bestYesBid before placing one. Sorted soonest-settlement first. ${SCOPE}`,
   inputSchema: {
     window_seconds: z.number().int().default(300)
       .describe('Window length. Only 300 is in proven scope; anything else is refused.'),
     require_yes_liquidity: z.boolean().default(true)
-      .describe('Drop markets with zero resting yesAsks depth. Depth is cheap to check (one order-book read per candidate) so this defaults on.'),
+      .describe('Drop markets with zero resting yesAsks depth. The gate is ASK-side only — yesBid depth is reported per market but never filters. Depth is cheap to check (one order-book read per candidate) so this defaults on.'),
     min_seconds_to_expiry: z.number().int().default(25)
       .describe('Skip markets settling too soon to place into.'),
     max_seconds_to_expiry: z.number().int().default(290)
@@ -52,12 +52,12 @@ server.registerTool('list_markets', {
 }, wrap(core.list_markets));
 
 server.registerTool('place_order', {
-  title: 'Place a YES-direction bet on a 300s window',
+  title: 'Place a YES or NO directional bet on a 300s window',
   description: `Snaps the crossing price to a valid integer tick (shared build/tick-snap.mjs), auto-approves the per-pool ERC20 allowance, enforces server-side risk guardrails, simulates, then broadcasts via the self \`placeBinaryOrder\` path. Fill is confirmed by ERC6909 + collateral BALANCE DELTA, never by transaction status. If the receipt-time read shows no fill, the order is polled every 5s for up to 60s. Returns \`fill.fillStatus\` as one of three DISTINCT states, which must not be collapsed: **FILLED** (confirmed by balance increase, with observed latency in \`fill.resolution\`), **PENDING** (accepted and resting, unresolved at the 60s deadline — \`fill.filled\` is \`null\`, NOT false; recheck with get_position), **NOT_FILLED** (terminal — window expired unfilled). Size EITHER by \`stake_units\` (raw outcome-token quantity) OR by \`targetDollarAmount\` (cash) — not both. A reverted broadcast returns \`{ok:false, reason:'reverted'}\` and is retried automatically exactly once; it is a normal, often state-dependent outcome. Risk limits (max stake per window, max daily loss) are enforced server-side from environment configuration and are deliberately NOT parameters of this tool. ${SCOPE}`,
   inputSchema: {
     market_id: z.string().describe('marketId from list_markets.'),
     direction: z.enum(['YES', 'NO']).default('YES')
-      .describe('Only YES is supported. NO is refused: a BUY_NO has never filled at any expressible price and the cause is undetermined.'),
+      .describe('YES or NO. NO fills via mint-a-pair against a resting BUY_YES order — if the book has no BUY_YES depth to cross, expect a PENDING or NOT_FILLED result, not a revert. The exact crossing boundary is inferred from real on-chain fills, not read from verified contract source — see research/NO-side-fill-paths.md.'),
     stake_units: z.number().optional()
       .describe('Sizing mode A: OUTCOME-TOKEN QUANTITY to buy, not a cash amount. 1.0 = one unit, the size proven in Phase A. Mutually exclusive with targetDollarAmount. Defaults to 1.0 if neither is given.'),
     targetDollarAmount: z.number().optional()
@@ -139,10 +139,10 @@ server.registerTool('list_wallets', {
 
 server.registerTool('parse_intent', {
   title: 'Validate and normalize a trading intent into place_order arguments',
-  description: `Takes ALREADY-EXTRACTED structured intent and returns exactly what place_order needs, refusing anything unsupported before it can reach the chain. THIS TOOL DOES NOT DO NATURAL-LANGUAGE UNDERSTANDING and does not call an LLM — YOU (the calling agent) read the user's sentence and extract direction/asset/window/amount; this validates and normalizes them deterministically. It accepts synonyms (up/long -> YES, bitcoin -> BTC, "5m" -> 300, "$10" -> 10), resolves the asset to a live gated market with real YES depth, and returns a \`confirmation\` block with estimated units, cost, max payout and payout multiple to show the user BEFORE executing. IT PLACES NOTHING — pass the returned \`placeOrderArgs\` to place_order after the user confirms. Refusals use stable machine codes in \`reason\`: direction_not_supported (NO side — never filled at any expressible price, cause undetermined), window_not_supported (only 300s is proven; 60s liquidity is UNRELIABLE, not confirmed empty), asset_not_supported, ambiguous_sizing, sizing_required, invalid_target_dollar_amount, no_tradeable_market (transient, not invalid), no_market_with_adequate_runway (markets exist but all settle too soon to confirm — see min_seconds_to_expiry). ${SCOPE}`,
+  description: `Takes ALREADY-EXTRACTED structured intent and returns exactly what place_order needs, refusing anything unsupported before it can reach the chain. THIS TOOL DOES NOT DO NATURAL-LANGUAGE UNDERSTANDING and does not call an LLM — YOU (the calling agent) read the user's sentence and extract direction/asset/window/amount; this validates and normalizes them deterministically. It accepts synonyms (up/long -> YES, down/short -> NO, bitcoin -> BTC, "5m" -> 300, "$10" -> 10), resolves the asset to a live gated market with real book depth, and returns a \`confirmation\` block with estimated units, cost, max payout and payout multiple to show the user BEFORE executing. A NO direction returns \`ok:true\` with a WARNING (not a refusal) citing the real, still-open caveats — the crossing boundary is inferred from on-chain fills, not verified source. IT PLACES NOTHING — pass the returned \`placeOrderArgs\` to place_order after the user confirms. Refusals use stable machine codes in \`reason\`: direction_required, direction_unrecognized, window_not_supported (only 300s is proven; 60s liquidity is UNRELIABLE, not confirmed empty), asset_not_supported, ambiguous_sizing, sizing_required, invalid_target_dollar_amount, no_tradeable_market (transient, not invalid), no_market_with_adequate_runway (markets exist but all settle too soon to confirm — see min_seconds_to_expiry). ${SCOPE}`,
   inputSchema: {
     direction: z.string().optional()
-      .describe('Direction the user wants, as extracted. Synonyms accepted: YES/up/long/higher/bullish -> YES; NO/down/short/lower/bearish -> NO (refused, with the documented reason).'),
+      .describe('Direction the user wants, as extracted. Synonyms accepted: YES/up/long/higher/bullish -> YES; NO/down/short/lower/bearish -> NO (accepted, with a warning about real, still-open caveats — see place_order\'s direction description).'),
     asset: z.string().optional()
       .describe('Asset as extracted. Accepts BTC/bitcoin/XBT and ETH/ether/ethereum. Only BTC and ETH are in scope.'),
     window_seconds: z.union([z.number(), z.string()]).optional()

@@ -19,7 +19,7 @@
 // The proven scope, duplicated here as data rather than imported from mcp-core, so
 // this module stays free of chain imports and testable with no network. mcp-core
 // remains the enforcing authority — this is a pre-check that fails the same way.
-export const SUPPORTED_DIRECTIONS = ['YES'];
+export const SUPPORTED_DIRECTIONS = ['YES', 'NO'];
 export const SUPPORTED_WINDOWS = [300];
 export const SUPPORTED_ASSETS = ['BTC', 'ETH'];
 
@@ -128,11 +128,24 @@ export function normalizeIntent(input = {}) {
       { supportedDirections: SUPPORTED_DIRECTIONS });
   }
   if (!SUPPORTED_DIRECTIONS.includes(dir)) {
-    // The NO-side refusal. Cite the real evidence, including what it does NOT show.
+    // Unreachable while SUPPORTED_DIRECTIONS is ['YES','NO'] — kept as a real
+    // guard, not dead code, in case SUPPORTED_DIRECTIONS is ever narrowed again
+    // (e.g. NO support disabled pending re-verification after a protocol change).
     return refuse('direction_not_supported',
-      `direction resolved to NO (from "${dirRaw}"), which is out of proven scope and is refused rather than attempted. Evidence: a BUY_NO has never filled at any expressible price across two runs (0.58 and 0.999, byte-identical gas — no match-loop iterations either time). This is NOT explained by a thin book: run 2's order book demonstrably held 200 units of matchable liquidity behind the NO quote (noAsk 750000 mirrors a real resting yesBid at 0.250, 200x the 1.0 unit attempted). The leading hypothesis — that the YES-bid/NO-ask equivalence exists only in the display layer and not in the matching engine — is coherent but was NOT verified and was not acted on. So the cause is genuinely undetermined: logged, not root-caused (PROOF-LOG RUN 2 / RUN 3 PART 2). Attempting a NO order would spend gas on an order that has never filled.`,
-      { requestedDirection: dir, supportedDirections: SUPPORTED_DIRECTIONS,
-        suggestion: 'Only YES-direction bets are supported. If the user wants downside exposure, that is not expressible through this tool today — say so rather than substituting a YES bet, which is the opposite position.' });
+      `direction resolved to ${dir} (from "${dirRaw}"), which is out of proven scope.`,
+      { requestedDirection: dir, supportedDirections: SUPPORTED_DIRECTIONS });
+  }
+  if (dir === 'NO') {
+    // NO is supported, but carry its real, still-open caveats forward rather
+    // than let them silently disappear now that the blanket refusal is gone.
+    // Evidence: research/NO-side-fill-paths.md. Concretely — a BUY_NO fills via
+    // mint-a-pair against a resting BUY_YES; the exact crossing boundary is
+    // INFERRED from 6 decoded real fills, not read from verified pool source
+    // (§7 item 1, still open); DIRECT_NO (crossing a resting SELL_NO) has never
+    // been observed on this venue (0 of 200 sampled fills, §11d item 3) — if the
+    // book has no BUY_YES depth, a NO order may simply not fill, which is a
+    // different, more benign outcome than a wrong price, but worth knowing.
+    warnings.push('direction=NO fills via mint-a-pair against a resting BUY_YES order — the exact crossing boundary is inferred from real on-chain fills, not read from verified contract source (research/NO-side-fill-paths.md §7 item 1). A direct NO-vs-NO cross (DIRECT_NO) has never been observed on this venue; if there is no BUY_YES depth to cross, expect PENDING or NOT_FILLED, not a revert.');
   }
 
   // -------------------------------------------------------------------- asset

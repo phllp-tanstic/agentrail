@@ -26,19 +26,19 @@ check(1, 'VALID: YES / BTC / 300s / $2 is accepted and normalized',
   && v.placeOrderArgs.market_id === undefined,
   `placeOrderArgs=${JSON.stringify(v.placeOrderArgs)}\n         market_id absent as expected (the resolver adds it)`);
 
-// ---- 2. NO side -> must refuse with the documented reason
+// ---- 2. NO side -> now ACCEPTED (real evidence exists — research/NO-side-fill-paths.md),
+// but must carry the real, still-open caveats forward as a warning rather than
+// silently drop them now that the blanket refusal is gone.
 const no = normalizeIntent({ direction: 'NO', asset: 'BTC', window_seconds: 300, targetDollarAmount: 2 });
-check(2, 'NO side is REFUSED with the documented reason',
-  no.ok === false && no.refused === true && no.reason === 'direction_not_supported'
-  && /never filled/i.test(no.detail),
-  `reason=${no.reason}`);
-check(3, 'the NO refusal cites what the evidence does NOT show, not just that it failed',
-  /not.*explained by a thin book/i.test(no.detail) && /200 units/.test(no.detail)
-  && /undetermined/i.test(no.detail),
-  'cites run 2\'s 200 units of matchable liquidity + "cause undetermined" rather than implying a thin book');
-check(4, 'the NO refusal warns against substituting a YES bet',
-  /opposite position/i.test(no.suggestion ?? ''),
-  `suggestion mentions that substituting YES is the opposite position`);
+check(2, 'NO side is now ACCEPTED, not refused — real evidence supports it',
+  no.ok === true && no.placeOrderArgs?.direction === 'NO',
+  `ok=${no.ok} direction=${no.placeOrderArgs?.direction}`);
+check(3, 'the NO acceptance carries a warning citing the real evidence, not a silent pass-through',
+  Array.isArray(no.warnings) && no.warnings.some((w) => /mint-a-pair/i.test(w) && /inferred/i.test(w)),
+  `warnings=${JSON.stringify(no.warnings)}`);
+check(4, 'the NO warning is honest that DIRECT_NO has never been observed, not overclaiming full proof',
+  Array.isArray(no.warnings) && no.warnings.some((w) => /DIRECT_NO/i.test(w) && /never/i.test(w)),
+  'warns that a direct NO-vs-NO cross has never been observed on this venue, so the crossing path (mint-a-pair) is the only proven one');
 
 // ---- 3. 60s window -> must refuse
 const w60 = normalizeIntent({ direction: 'YES', asset: 'ETH', window_seconds: 60, targetDollarAmount: 2 });
@@ -81,9 +81,9 @@ check(12, 'alternate field names work: side/symbol/duration/stake',
   JSON.stringify(syn2.interpretation));
 
 const dn = normalizeIntent({ direction: 'short', asset: 'ETH', window_seconds: 300, amount: 1 });
-check(13, 'a NO synonym ("short") is resolved THEN refused, not misread as unrecognized',
-  dn.ok === false && dn.reason === 'direction_not_supported' && dn.requestedDirection === 'NO',
-  `"short" -> NO -> refused (reason=${dn.reason}), not direction_unrecognized`);
+check(13, 'a NO synonym ("short") is resolved and ACCEPTED, not misread as unrecognized',
+  dn.ok === true && dn.placeOrderArgs?.direction === 'NO',
+  `"short" -> NO -> accepted (direction=${dn.placeOrderArgs?.direction}), not direction_unrecognized`);
 
 const amb = normalizeIntent({ direction: 'YES', asset: 'BTC', window_seconds: 300, targetDollarAmount: 2, stake_units: 1 });
 check(14, 'both sizing modes at once is refused rather than one being picked',

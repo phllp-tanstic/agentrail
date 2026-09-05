@@ -8,18 +8,13 @@
 // "enforced in code, never trusted to the model" requirement from
 // AgentRail-Build-Spec.md §6.
 //
-// PER-SESSION LEDGER (this revision). Every exported function now takes a
-// required `session_id` and reads/writes that session's own state, keyed in
-// `ledgers`. This is NOT a limits-as-parameters violation — session_id
-// identifies WHOSE budget is being checked, it does not change what the
-// budget IS. RISK_CONFIG (the actual dollar limits) stays global: every
-// session is bound by the same env-configured caps, applied to that
-// session's own spend, not to a shared pool. Before this change, ALL
-// sessions shared one global spend/payout/reservation total — one user's
-// losses could exhaust the daily loss budget for every other user on the
-// same running process. That was never a viable multi-user design; it was
-// only safe because the earlier build had, in effect, exactly one user
-// (AGENTRAIL_OWNER_KEY signed every trade regardless of session_id).
+// PER-SESSION LEDGER. Every exported function takes a required `session_id`
+// and reads/writes that session's own state, keyed in `ledgers`. This is NOT
+// a limits-as-parameters violation — session_id identifies WHOSE budget is
+// being checked, it does not change what the budget IS. RISK_CONFIG (the
+// actual dollar limits) stays global: every session is bound by the same
+// env-configured caps, applied to that session's own spend, not to a shared
+// pool.
 //
 // RESERVE-ON-CHECK (Phase C fix, unchanged). checkPreOrder() MUTATES STATE: on
 // approval it immediately reserves the worst-case spend against that session's
@@ -27,7 +22,7 @@
 // race — previously the check read a committed total that was only updated
 // after the fill resolved seconds later, so concurrent callers each read the
 // same stale total, each passed the cap individually, and collectively
-// exceeded it. That race is per-session now, same as everything else here.
+// exceeded it. That race is per-session, tracked in-process.
 //
 // The caller MUST then resolve the reservation exactly once:
 //   commitReservation({session_id, reservationId, actualSpentUsd}) -> real spend
@@ -37,12 +32,41 @@
 // session without ever corresponding to a real order, so callers wrap the flow
 // in try/finally.
 //
-// Storage is in-memory for now, by instruction. Consequence stated plainly:
-// restarting the server resets EVERY session's daily counters AND drops every
-// session's open reservations. Persistence (checklist row #11, Tier 1 #4/#5)
-// is a later concern; the accounting shape here — now keyed per session — is
-// what a real DB-backed ledger would back.
+// ------------------------------------------------------------- PERSISTENCE
+// PERSISTED TO DISK (this revision) — a server restart no longer silently
+// resets every session's daily counters and drops open reservations. The
+// in-memory `ledgers` Map stays the hot working copy (every read/check hits
+// memory, not disk); the FULL map is rewritten to a JSON file after every
+// genuine mutation (a reservation created, committed, or released; a direct
+// spend or payout recorded). On module load, that file is read once to
+// hydrate `ledgers` before any caller ever sees it.
+//
+// WHAT THIS DOES NOT SOLVE, stated plainly:
+//   - Still single-process. Two AgentRail processes pointed at the same store
+//     file would each load-then-overwrite the whole file independently — a
+//     genuine multi-instance deployment (Tier 1 #5) needs a real database
+//     with real transactions, not this. This closes the "one process
+//     restarting loses everyone's state" gap, not the "many processes share
+//     state safely" gap — those are different problems.
+//   - A crash in the exact instant between an in-memory mutation and the
+//     synchronous disk write that follows it could lose that one mutation.
+//     The window is a single synchronous writeFileSync call, not a network
+//     round-trip, so this is a narrow risk, not a wide one — but it is not
+//     zero, and should not be described as zero.
+//   - A CORRUPT store file is NEVER silently replaced with a fresh empty one
+//     on load — that would silently zero out every session's daily loss
+//     tracking, which is a safety control, not just data. Corruption fails
+//     loudly at startup instead.
 // ============================================================================
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dir = path.dirname(fileURLToPath(import.meta.url));
+export const STORE_PATH = process.env.AGENTRAIL_RISK_STORE
+  ?? path.resolve(__dir, '.risk-store.json');
+const FILE_MODE = 0o600;
+const STORE_VERSION = 1;
 
 export const RISK_CONFIG = {
   // Max collateral committable to a single market window, in USD (tUSDC).
@@ -66,10 +90,89 @@ const freshState = () => ({
   seq: 0, events: [],
 });
 
-// session_id -> ledger state. Unbounded for now, same as the old single
-// object was unbounded in time — a real deployment persists this (Tier 1 #4)
-// rather than growing it forever in process memory.
+// session_id -> ledger state. Hydrated from disk once below, then kept as the
+// hot in-memory working copy for the rest of the process's life — every
+// read/check hits memory; disk is only touched on write, and on this one load.
 const ledgers = new Map();
+
+// --- serialize/deserialize: a state's `reservations` field is a Map, which
+// JSON cannot represent directly, so it's converted to an array of entries
+// on the way out and rebuilt as a Map on the way in.
+function serializeLedgers() {
+  const out = { version: STORE_VERSION, ledgers: {} };
+  for (const [sid, state] of ledgers.entries()) {
+    out.ledgers[sid] = { ...state, reservations: [...state.reservations.entries()] };
+  }
+  return out;
+}
+
+/**
+ * A true synchronous sleep — Atomics.wait on a throwaway SharedArrayBuffer is
+ * the standard safe way to block briefly in Node without an async callback,
+ * needed here because persist() must stay synchronous (it's called from
+ * synchronous risk-check functions that callers depend on completing before
+ * returning).
+ */
+function sleepMsSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Retries the rename a few times with backoff before giving up. FOUND LIVE,
+ * on Windows, during real testing: rapid successive persist() calls (many
+ * risk mutations in quick succession — exactly what a real trading session
+ * does) can hit a transient EPERM/EBUSY when something else (commonly
+ * antivirus or a file indexer) briefly locks the just-written temp file
+ * right as the rename happens. An unguarded one-shot renameSync crashed the
+ * risk check that triggered it — which would have crashed real order
+ * placement, not just a test run. This does NOT fall back to a non-atomic
+ * write on exhaustion — that would trade away the "no truncated file" crash
+ * safety property persist() exists to provide. After retries are exhausted
+ * it still throws, deliberately: a caller seeing this is rare should treat
+ * it as a real, reportable failure, not something silently downgraded.
+ */
+function renameWithRetry(tmp, dest, attempts = 5) {
+  for (let i = 0; i < attempts; i++) {
+    try { fs.renameSync(tmp, dest); return; }
+    catch (e) {
+      const transient = e.code === 'EPERM' || e.code === 'EBUSY' || e.code === 'EACCES';
+      if (!transient || i === attempts - 1) throw e;
+      sleepMsSync(10 * (i + 1)); // 10, 20, 30, 40ms — short, since this blocks the event loop
+    }
+  }
+}
+
+function persist() {
+  const dir = path.dirname(STORE_PATH);
+  const tmp = path.join(dir, `.risk-store.${process.pid}.tmp`);
+  fs.writeFileSync(tmp, JSON.stringify(serializeLedgers(), null, 2), { mode: FILE_MODE });
+  renameWithRetry(tmp, STORE_PATH); // atomic within a filesystem — no truncated-file window
+  try { fs.chmodSync(STORE_PATH, FILE_MODE); } catch { /* non-POSIX */ }
+}
+
+function loadPersistedLedgers() {
+  let raw;
+  try {
+    raw = fs.readFileSync(STORE_PATH, 'utf8');
+  } catch (e) {
+    if (e.code === 'ENOENT') return; // first run — nothing to hydrate, start empty
+    throw new Error(`risk store at ${STORE_PATH} could not be read and will NOT be treated as empty (that would silently zero out every session's daily loss tracking, which is a safety control): ${e.message}`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || typeof parsed.ledgers !== 'object') {
+      throw new Error('store file is present but not in the expected shape');
+    }
+  } catch (e) {
+    throw new Error(`risk store at ${STORE_PATH} is present but corrupt and will NOT be silently replaced with an empty ledger (that would zero out every session's daily loss tracking without warning): ${e.message}. Fix or remove the file manually if you are certain starting fresh is safe.`);
+  }
+  for (const [sid, state] of Object.entries(parsed.ledgers)) {
+    ledgers.set(sid, { ...state, reservations: new Map(state.reservations ?? []) });
+  }
+}
+
+loadPersistedLedgers(); // hydrate once, at import time, before any caller can observe an empty ledger
 
 function requireSessionId(session_id) {
   const sid = String(session_id ?? '').trim();
@@ -148,7 +251,7 @@ export function riskSnapshot(session_id) {
       [...new Set([...Object.keys(state.perMarket),
         ...[...state.reservations.values()].map((r) => r.marketId)])]
         .map((k) => [k, Number(windowExposure(state, k).toFixed(6))])),
-    storage: 'in-memory, per session_id — resets on server restart, which also drops open reservations for every session (by instruction; persistence is a later concern, Tier 1 #4)',
+    storage: `persisted to disk at ${STORE_PATH}, per session_id — survives a server restart. Still single-process: two processes sharing this file would each overwrite it independently, which is not safe multi-instance sharing (Tier 1 #5 remains a real DB, not this).`,
     drawdownDefinition: 'spend + open reservations − payout, floored at 0, WITHIN THIS SESSION. Unredeemed positions and in-flight reservations both count as loss until resolved (conservative, fails closed).',
   };
 }
@@ -208,6 +311,7 @@ export function checkPreOrder({ session_id, marketId, estimatedSpendUsd }) {
   const reservationId = `rsv_${sid}_${state.day}_${++state.seq}`;
   state.reservations.set(reservationId, { marketId, amountUsd: spend, at: new Date().toISOString() });
   state.events.push({ at: new Date().toISOString(), kind: 'reserve', marketId, usd: spend, reservationId });
+  persist();
 
   return { ...base, allow: true, reservationId,
     drawdownUsd: Number(dd.toFixed(6)),
@@ -239,6 +343,7 @@ export function commitReservation({ session_id, reservationId, marketId = null, 
     }
     state.events.push({ at: new Date().toISOString(), kind: 'commit_orphan',
       marketId, usd: safeActual, reservationId });
+    persist();
     return { ...riskSnapshot(sid), warning: `reservation ${reservationId} was not open in session ${sid}'s ledger (already resolved, never created, or created under a different session_id); recorded ${safeActual} USD of real spend without a matching reservation.` };
   }
 
@@ -250,6 +355,7 @@ export function commitReservation({ session_id, reservationId, marketId = null, 
   state.events.push({ at: new Date().toISOString(), kind: 'commit', marketId: rsv.marketId,
     reservedUsd: rsv.amountUsd, actualUsd: safeActual,
     releasedDifferenceUsd: Number((rsv.amountUsd - safeActual).toFixed(6)), reservationId });
+  persist();
   return riskSnapshot(sid);
 }
 
@@ -262,6 +368,7 @@ export function releaseReservation({ session_id, reservationId, why = 'unspecifi
   state.reservations.delete(reservationId);
   state.events.push({ at: new Date().toISOString(), kind: 'release',
     marketId: rsv.marketId, usd: rsv.amountUsd, reservationId, why });
+  persist();
   return riskSnapshot(sid);
 }
 
@@ -278,6 +385,7 @@ export function recordSpend({ session_id, marketId, spentUsd }) {
   state.spendUsd += v;
   state.perMarket[marketId] = (state.perMarket[marketId] ?? 0) + v;
   state.events.push({ at: new Date().toISOString(), kind: 'spend', marketId, usd: v });
+  persist();
   return riskSnapshot(sid);
 }
 
@@ -289,6 +397,7 @@ export function recordPayout({ session_id, marketId, payoutUsd }) {
   if (!Number.isFinite(v) || v <= 0) return riskSnapshot(sid);
   state.payoutUsd += v;
   state.events.push({ at: new Date().toISOString(), kind: 'payout', marketId, usd: v });
+  persist();
   return riskSnapshot(sid);
 }
 
@@ -301,10 +410,11 @@ export function _openReservations(session_id) {
 /** Test-only: every session_id with any ledger state. Not an MCP tool. */
 export function _allLedgerSessionIds() { return [...ledgers.keys()]; }
 
-/** Test-only: clear in-memory accounting for one session (or all, if omitted). Not an MCP tool. */
+/** Test-only: clear in-memory AND persisted accounting for one session (or all, if omitted). Not an MCP tool. */
 export function _resetRiskState(session_id) {
-  if (session_id === undefined) { ledgers.clear(); return { ok: true, clearedAll: true }; }
+  if (session_id === undefined) { ledgers.clear(); persist(); return { ok: true, clearedAll: true }; }
   const sid = requireSessionId(session_id);
   ledgers.set(sid, freshState());
+  persist();
   return riskSnapshot(sid);
 }

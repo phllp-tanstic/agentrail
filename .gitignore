@@ -34,3 +34,13 @@ build/.trade-log/
 build/.accounts-store.json
 *.accounts-store.json
 *.accounts-store.json.*
+
+# Risk ledger store — per-session spend/loss tracking, persisted across
+# restarts. Not secret, but real per-user financial state; does not
+# belong in git. Covering both the exact filename and any future
+# backup-variant suffix from day one.
+.risk-store.json
+build/.risk-store.json
+*.risk-store.json
+*.risk-store.json.*
+.risk-store.*.tmp

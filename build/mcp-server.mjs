@@ -1,5 +1,5 @@
 // ============================================================================
-// AgentRail MCP SERVER — stdio transport.
+// AgentRail MCP SERVER — stdio transport, with OPTIONAL Streamable HTTP.
 //
 // A THIN registration layer over ./mcp-core.mjs. There is deliberately no logic
 // in this file beyond schema declaration and result serialisation: everything
@@ -13,10 +13,18 @@
 //                                          is a legacy path used only by
 //                                          standalone build/ scripts, never by
 //                                          the tools registered in this file)
+//       AGENTRAIL_HTTP_PORT=8787 node build/mcp-server.mjs
+//                                          (additionally starts a Streamable
+//                                          HTTP listener — default bind
+//                                          127.0.0.1, override with
+//                                          AGENTRAIL_HTTP_HOST; see the HTTP
+//                                          block at the bottom of this file)
 // Test: node build/mcp-test.mjs          (calls the same functions directly)
 // ============================================================================
+import http from 'node:http';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
 import * as core from './mcp-core.mjs';
 
@@ -36,6 +44,7 @@ const wrap = (fn) => async (args) => {
 
 const SCOPE = 'PROVEN SCOPE: YES and NO directional bets on 300-second windows, via the self `placeBinaryOrder` path. NO fills via mint-a-pair against a resting BUY_YES — the exact crossing boundary is inferred from real on-chain fills, not read from verified pool source (research/NO-side-fill-paths.md §7 item 1); a direct NO-vs-NO cross has never been observed on this venue. Other window lengths and the delegated operator path are refused — they are unproven or closed. Somnia Shannon testnet.';
 
+function registerAllTools(server) {
 server.registerTool('list_markets', {
   title: 'List tradeable DreamDEX event-contract windows',
   description: `Live binary markets that are (a) 300-second windows, (b) OPEN on the on-chain status gate (getMarketOnchain().status === Trading), and (c) backed by real resting YES-side ask depth. Reports resting depth on BOTH crossing sides per market, from one order-book read: yesAskDepthUnits/yesAskDepthRaw/bestYesAsk/bestYesAskProb (the side a YES order crosses) AND yesBidDepthUnits/yesBidDepthRaw/bestYesBid/bestYesBidProb (real BUY_YES resting orders — the side a NO order crosses via mint-a-pair). A NO order needs non-zero yesBid depth to find liquidity; check bestYesBid before placing one. Sorted soonest-settlement first. ${SCOPE}`,
@@ -210,5 +219,145 @@ server.registerTool('get_trade_log', {
       .describe('Dry-run redeem entries are logged and flagged dryRun:true so they can never be mistaken for a real broadcast. Set false to exclude them.'),
   },
 }, wrap(core.get_trade_log));
+}
 
+// ----------------------------------------------------------------------------
+// The stdio server — the ORIGINAL McpServer instance, same registerTool calls,
+// same wrap(core.*) references, connected to stdio exactly as before. With
+// AGENTRAIL_HTTP_PORT unset, everything below this point is inert and this
+// file behaves byte-for-byte as the original.
+// ----------------------------------------------------------------------------
+registerAllTools(server);
 await server.connect(new StdioServerTransport());
+// ============================================================================
+// OPTIONAL STREAMABLE HTTP TRANSPORT — strictly opt-in. Nothing in this block
+// runs unless AGENTRAIL_HTTP_PORT is set; without it, only the stdio connect()
+// above is executed — byte-for-byte the original behaviour. No listener is
+// ever started when the env var is absent.
+//
+// ARCHITECTURE — TWO INDEPENDENT transport lives, not one alternating server.
+// The SDK allows a McpServer exactly ONE transport at a time, and its own
+// streamable-HTTP examples build a FRESH McpServer per request. An earlier
+// revision tried alternating the stdio server's single slot between stdio and
+// HTTP — but that could abort an in-flight stdio tool call when an HTTP request
+// arrived mid-execution, which for a system that signs real transactions is
+// exactly the failure the risk-ledger reservation lifecycle exists to prevent.
+// So the stdio connection below is NEVER touched by HTTP, and all real state
+// (risk ledger, wallet store, accounts store, trade log) lives in shared
+// disk-backed modules invoked by the same wrap(core.*) references.
+//
+// WHY PER-REQUEST TRANSPORTS FOR HTTP (empirically required, not chosen for
+// convenience): a PERSISTENT StreamableHTTPServerTransport — one instance
+// serving many requests — is broken on this platform. Minimal, AgentRail-free
+// reproduction (SDK 1.30.0 + Node 24 + Windows): the FIRST request succeeds
+// (200), and every subsequent request on the same persistent transport returns
+// an empty 500 — with the AgentRail wiring additionally showing a process
+// killing libuv assertion ("UV_HANDLE_CLOSING", src/win/async.c) on Windows.
+// The SDK source (webStandardStreamableHttp.js) shows per-request jsonResponse
+// tracking keyed by a unique crypto.randomUUID streamId and the JSON-RPC id —
+// i.e. concurrent handleRequest() needs no internal serialization — but the
+// persistent lifecycle itself still fails empirically. The per-request pattern
+// is exactly what the SDK ships as its own stateless example, and it passes 8
+// sequential + 2 concurrent requests in the minimal reproduction. So each HTTP
+// request builds a fresh McpServer + fresh stateless transport via
+// registerAllTools (same tool references, no state duplication), serves it, and
+// closes it. The stdio server is never part of that lifecycle — no shared
+// slot, no detach/reattach, no mutex, and no way for HTTP to disturb stdio.
+//
+// Stateless mode (sessionIdGenerator: undefined) means MCP transport-session
+// state is never created: AgentRail's session concept is session_id + api_key
+// inside each tool's arguments, and a parallel transport-session ledger would
+// only drift from it. enableJsonResponse makes every POST return a plain
+// JSON-RPC JSON object (no SSE stream), which is what a scripted caller needs.
+//
+// AUTH: unchanged and untouchable here — requireApiKey() gates tool calls at
+// the mcp-core.mjs layer exactly as it does over stdio. There is NO transport
+// level auth (no Basic/Bearer), on purpose: that would be a second, redundant
+// auth system. The api_key travels in the request body — hence the TLS warning.
+// ============================================================================
+if (process.env.AGENTRAIL_HTTP_PORT) {
+  const HTTP_PORT = Number(process.env.AGENTRAIL_HTTP_PORT);
+  const HTTP_HOST = process.env.AGENTRAIL_HTTP_HOST ?? '127.0.0.1'; // localhost-only default, never 0.0.0.0
+  const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
+
+  // Each HTTP request gets a FRESH McpServer + FRESH stateless transport on the
+  // HTTP side (the SDK's own stateless pattern — a persistent transport is
+  // broken on this platform; see the comment block above). Concurrent HTTP
+  // requests are therefore fully independent, and none of this ever touches
+  // the stdio server's transport.
+  async function handleHttpRequest(req, res) {
+    const httpMcpServer = new McpServer({ name: 'agentrail', version: '0.1.0' });
+    registerAllTools(httpMcpServer);
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,   // stateless
+      enableJsonResponse: true,        // plain JSON-RPC JSON response per POST
+    });
+    let thrown = null;
+    try {
+      await httpMcpServer.connect(transport);
+      await transport.handleRequest(req, res);
+    } catch (e) {
+      thrown = e;
+    } finally {
+      try { await transport.close(); } catch { /* close() is idempotent */ }
+    }
+    if (thrown) throw thrown;
+  }
+
+  // --------------------------------------------------------------------------
+  // LOUD, IMPOSSIBLE-TO-MISS WARNING — there is no TLS in this server, and
+  // api_key authenticates every tool call.
+  // ==========================================================================
+  console.error('='.repeat(80));
+  console.error('                                  WARNING');
+  console.error('  HTTP transport is ACTIVE. AgentRail is listening on');
+  console.error(`    http://${HTTP_HOST}:${HTTP_PORT}/mcp`);
+  console.error('  This sends api_key values over plain HTTP unless you have TLS');
+  console.error('  termination in front of this (nginx, Caddy, a tunnel like');
+  console.error('  Tailscale/ngrok, etc.) — this server does NOT provide TLS itself.');
+  console.error('  Do not expose this beyond localhost without one.');
+  console.error('='.repeat(80));
+
+  const httpServer = http.createServer((req, res) => {
+    if (req.method !== 'POST') {
+      // Stateless mode has no GET (SSE) or DELETE (session) semantics; the SDK's
+      // own stateless example answers these with 405.
+      res.writeHead(405, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ jsonrpc: '2.0',
+        error: { code: -32000, message: 'Method not allowed.' }, id: null }));
+      return;
+    }
+    // Loopback-only DNS-rebinding guard (mirrors createMcpExpressApp): when
+    // bound to localhost, refuse any Host header that is not this machine, so a
+    // malicious web page cannot drive requests at 127.0.0.1 through a browser.
+    if (LOOPBACK_HOSTS.has(HTTP_HOST)) {
+      const host = String(req.headers.host ?? '').toLowerCase().replace(/:\d+$/, '');
+      if (!LOOPBACK_HOSTS.has(host)) {
+        res.writeHead(400, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ jsonrpc: '2.0',
+          error: { code: -32000, message: `Bad Request: Host ${req.headers.host} is not allowed.` },
+          id: null }));
+        return;
+      }
+    }
+    handleHttpRequest(req, res).catch((e) => {
+      console.error('[http] request error:', e?.message ?? e);
+      if (!res.headersSent) {
+        res.writeHead(500, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ jsonrpc: '2.0',
+          error: { code: -32603, message: 'Internal server error' }, id: null }));
+      } else {
+        res.destroy();
+      }
+    });
+  });
+
+  httpServer.listen(HTTP_PORT, HTTP_HOST, () => {
+    const addr = httpServer.address();
+    console.error(`[http] Streamable HTTP endpoint live at http://${HTTP_HOST}:${addr.port}/mcp`);
+    console.error('[http] independent HTTP path (fresh stateless server+transport per request); stdio server untouched; auth stays at the tool layer (requireApiKey).');
+  });
+  httpServer.on('error', (e) => {
+    console.error('[http] listener error:', e?.message ?? e);
+  });
+}

@@ -208,6 +208,14 @@ function ctx({ session_id = null, requireKey = false } = {}) {
   return c;
 }
 
+/** Test-only: the currently CACHED signer address for a session, without
+ * touching the network (building a wallet client is pure/local — only method
+ * calls like readContract/sendTransaction touch the chain). Exists purely to
+ * make ctx()'s cache behavior independently testable. Not an MCP tool. */
+export function _ctxAddressForSession(session_id) {
+  return ctx({ session_id }).owner?.address ?? null;
+}
+
 const bal6909 = (session_id, id) => ctx({ session_id }).pc.readContract({
   address: OUTCOME_TOKEN, abi: SDK.erc6909Abi, functionName: 'balanceOf',
   args: [ctx({ session_id, requireKey: true }).owner.address, BigInt(id)] });
@@ -1273,6 +1281,16 @@ export { get_trade_log, TRADE_LOG_DIR, DEFAULT_SESSION_ID } from './trade-log.mj
 export function generate_wallet({ session_id, api_key, label = null, force_new = false } = {}) {
   requireApiKey(session_id, api_key);
   const res = walletGenerate({ session_id, label, force_new });
+  // BUG FIX (found during independent custody review, reproduced before this
+  // fix existed): ctx() caches a session's wallet client the first time it's
+  // built and never invalidated it. A force_new rotation changed which key
+  // wallet.mjs's store considered correct, but every OTHER tool call for that
+  // session — within the same running process — kept silently signing,
+  // reading balance, and reading position against the OLD wallet, since
+  // ctx()'s cache never learned anything changed. res.created === true covers
+  // both a genuine first-time creation (nothing cached yet, so this delete is
+  // a harmless no-op) and a force_new rotation (where it's load-bearing).
+  if (res.created === true) _ctxBySession.delete(String(session_id).trim());
   // Key the log entry to the SAME session id the wallet is stored under, so a
   // wallet and the orders placed for that session land in one history.
   const logged = recordWallet({ session_id, res, forceNew: force_new });

@@ -102,5 +102,33 @@ const r12 = core.generate_wallet({ session_id: 'authtest_1', api_key: acct.apiKe
 check(12, 'generate_wallet with the CORRECT api_key for the CORRECT session succeeds',
   r12.ok === true && r12.created === true, `ok=${r12.ok} created=${r12.created}`);
 
+console.log('\n=== REGRESSION: ctx() cache must invalidate on force_new (found during independent custody review) ===\n');
+
+// Found via independent review, reproduced empirically, then fixed: ctx()
+// cached a session's wallet client on first use and NEVER invalidated it, so
+// after a force_new rotation, every OTHER tool call for that session — within
+// the same running process — kept silently signing/reading against the OLD
+// wallet, while generate_wallet's own response correctly reported the new
+// one. A split-brain between the store (source of truth) and the cache.
+// Testable fully offline: building a wallet client is pure/local (viem client
+// objects are lazy — only a method call like readContract touches the chain),
+// so ctx()'s cache behavior needs zero network access to verify.
+const acct2 = create_account({ session_id: 'ctx_cache_regress' });
+const before = core.generate_wallet({ session_id: 'ctx_cache_regress', api_key: acct2.apiKey });
+const cachedBefore = core._ctxAddressForSession('ctx_cache_regress');
+check(13, 'ctx() cache matches the wallet store immediately after first creation',
+  cachedBefore === before.address, `store=${before.address} cache=${cachedBefore}`);
+
+const after = core.generate_wallet({ session_id: 'ctx_cache_regress', api_key: acct2.apiKey, force_new: true });
+check(14, 'force_new actually produced a DIFFERENT address (sanity check on the test itself)',
+  after.address !== before.address, `before=${before.address} after=${after.address}`);
+
+const cachedAfter = core._ctxAddressForSession('ctx_cache_regress');
+check(15, 'ctx() cache reflects the NEW address after force_new — the actual regression this test guards',
+  cachedAfter === after.address,
+  cachedAfter === after.address
+    ? `cache correctly updated to ${cachedAfter}`
+    : `STALE CACHE: store says ${after.address} but ctx() still serves ${cachedAfter}`);
+
 console.log(`\n=== RESULT: ${pass}/${pass + fail} PASS${fail ? `, ${fail} FAIL` : ''} ===`);
 process.exit(fail ? 1 : 0);

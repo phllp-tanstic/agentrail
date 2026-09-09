@@ -35,6 +35,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
+import { withFileLock } from './filelock.mjs';
 
 const __dir = path.dirname(fileURLToPath(import.meta.url));
 
@@ -92,20 +93,28 @@ export function create_account({ session_id, label = null } = {}) {
       detail: 'session_id must be a non-empty string — the identifier this account is created under.' };
   }
   const sid = session_id.trim();
-  const store = readStore();
-  if (store.accounts[sid]) {
-    return { ok: false, refused: true, reason: 'account_already_exists',
-      detail: `An account already exists for session_id="${sid}", created ${store.accounts[sid].createdAt}. The API key is never recoverable after creation and is not reissued here — if it is lost, use rotate_api_key, which requires proving the CURRENT key. There is deliberately no "forgot my key" path: recovering a lost secret without proof of ownership would defeat the point of having one.` };
-  }
-  const apiKey = generateApiKey();
-  const salt = randomBytes(SALT_BYTES).toString('hex');
-  store.version = STORE_VERSION;
-  store.accounts[sid] = { salt, hash: hashApiKey(apiKey, salt),
-    createdAt: new Date().toISOString(), label, rotatedAt: null };
-  writeStore(store);
-  return { ok: true, created: true, sessionId: sid, apiKey,
-    warning: 'THIS IS THE ONLY TIME THIS KEY IS SHOWN. AgentRail stores only a salted hash and cannot recover or redisplay it — save it now. Every write-capable tool (generate_wallet, place_order, get_position, redeem, withdraw, and get_wallet_balance-by-session_id) requires it from now on.',
-    nextStep: 'Call generate_wallet with this session_id and api_key to create your dedicated trading wallet.' };
+
+  // LOCKED across processes — same reasoning as wallet.mjs's generate_wallet:
+  // two separate processes could both pass the "doesn't exist yet" check
+  // before either had written, and the second write would silently win,
+  // handing the first caller an api_key that stops working immediately (and
+  // since it's shown exactly once, unrecoverably). See build/filelock.mjs.
+  return withFileLock(ACCOUNTS_STORE_PATH, () => {
+    const store = readStore();
+    if (store.accounts[sid]) {
+      return { ok: false, refused: true, reason: 'account_already_exists',
+        detail: `An account already exists for session_id="${sid}", created ${store.accounts[sid].createdAt}. The API key is never recoverable after creation and is not reissued here — if it is lost, use rotate_api_key, which requires proving the CURRENT key. There is deliberately no "forgot my key" path: recovering a lost secret without proof of ownership would defeat the point of having one.` };
+    }
+    const apiKey = generateApiKey();
+    const salt = randomBytes(SALT_BYTES).toString('hex');
+    store.version = STORE_VERSION;
+    store.accounts[sid] = { salt, hash: hashApiKey(apiKey, salt),
+      createdAt: new Date().toISOString(), label, rotatedAt: null };
+    writeStore(store);
+    return { ok: true, created: true, sessionId: sid, apiKey,
+      warning: 'THIS IS THE ONLY TIME THIS KEY IS SHOWN. AgentRail stores only a salted hash and cannot recover or redisplay it — save it now. Every write-capable tool (generate_wallet, place_order, get_position, redeem, withdraw, and get_wallet_balance-by-session_id) requires it from now on.',
+      nextStep: 'Call generate_wallet with this session_id and api_key to create your dedicated trading wallet.' };
+  });
 }
 
 /** Rotation REQUIRES the current key — never allow rotation without proof of
@@ -120,25 +129,32 @@ export function rotate_api_key({ session_id, current_api_key } = {}) {
       detail: 'Rotation requires the CURRENT api_key as proof of ownership. There is no rotation path that skips this.' };
   }
   const sid = session_id.trim();
-  const store = readStore();
-  const acct = store.accounts[sid];
-  if (!acct) {
-    return { ok: false, refused: true, reason: 'account_not_found',
-      detail: `No account exists for session_id="${sid}". Call create_account first.` };
-  }
-  const provided = Buffer.from(hashApiKey(current_api_key, acct.salt), 'hex');
-  const stored = Buffer.from(acct.hash, 'hex');
-  if (provided.length !== stored.length || !timingSafeEqual(provided, stored)) {
-    return { ok: false, refused: true, reason: 'invalid_current_api_key',
-      detail: 'The provided current_api_key does not match this account. Rotation refused.' };
-  }
-  const apiKey = generateApiKey();
-  const salt = randomBytes(SALT_BYTES).toString('hex');
-  store.accounts[sid] = { ...acct, salt, hash: hashApiKey(apiKey, salt),
-    rotatedAt: new Date().toISOString() };
-  writeStore(store);
-  return { ok: true, sessionId: sid, apiKey,
-    warning: 'THIS IS THE ONLY TIME THIS NEW KEY IS SHOWN. The previous key no longer works — it was invalidated by this rotation, not merely superseded.' };
+
+  // LOCKED across processes, including the verification step itself — not
+  // just the write. Verifying against a hash that a concurrent process is
+  // about to change, then writing based on that stale verification, is the
+  // same class of cross-process TOCTOU this module exists to close.
+  return withFileLock(ACCOUNTS_STORE_PATH, () => {
+    const store = readStore();
+    const acct = store.accounts[sid];
+    if (!acct) {
+      return { ok: false, refused: true, reason: 'account_not_found',
+        detail: `No account exists for session_id="${sid}". Call create_account first.` };
+    }
+    const provided = Buffer.from(hashApiKey(current_api_key, acct.salt), 'hex');
+    const stored = Buffer.from(acct.hash, 'hex');
+    if (provided.length !== stored.length || !timingSafeEqual(provided, stored)) {
+      return { ok: false, refused: true, reason: 'invalid_current_api_key',
+        detail: 'The provided current_api_key does not match this account. Rotation refused.' };
+    }
+    const apiKey = generateApiKey();
+    const salt = randomBytes(SALT_BYTES).toString('hex');
+    store.accounts[sid] = { ...acct, salt, hash: hashApiKey(apiKey, salt),
+      rotatedAt: new Date().toISOString() };
+    writeStore(store);
+    return { ok: true, sessionId: sid, apiKey,
+      warning: 'THIS IS THE ONLY TIME THIS NEW KEY IS SHOWN. The previous key no longer works — it was invalidated by this rotation, not merely superseded.' };
+  });
 }
 
 /**

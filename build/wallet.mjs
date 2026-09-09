@@ -72,6 +72,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes, createCipheriv, createDecipheriv } from 'node:crypto';
+import { withFileLock } from './filelock.mjs';
 
 const __dir = path.dirname(fileURLToPath(import.meta.url));
 
@@ -207,43 +208,54 @@ export function generate_wallet({ session_id, label = null, force_new = false } 
       detail: 'session_id must be a non-empty string. It is the key a generated wallet is stored under and the handle used to look it up later.' };
   }
   const sid = session_id.trim();
-  const store = readStore();
-  const existing = store.wallets[sid];
 
-  if (existing && !force_new) {
-    return { ok: true, created: false, ...publicView(sid, existing),
-      note: 'A wallet already existed for this session_id and was returned unchanged. This call did NOT generate a new keypair — rotating an address that may already hold a deposit would strand those funds. Pass force_new:true only if you accept that the previous address (and anything in it) becomes unreachable through this session_id.'
-        + (existing.privateKey !== undefined ? ' NOTE: this record is still in the old plaintext format — it can be listed but cannot sign until build/migrate-wallet-store.mjs has been run.' : ''),
-      storage: STORE_DISCLOSURE };
-  }
+  // LOCKED: the whole read -> check-if-exists -> write sequence must be
+  // atomic across PROCESSES, not just within one. Found via independent
+  // custody review and reproduced: two separate node processes racing here
+  // could both pass the "doesn't exist yet" check before either had written,
+  // then both write — the second write silently wins and the first caller's
+  // private key is gone with zero preservation. See build/filelock.mjs for
+  // the full mechanism and why this is NOT needed for same-process calls
+  // (JS's single-threaded execution model already serializes those).
+  return withFileLock(STORE_PATH, () => {
+    const store = readStore();
+    const existing = store.wallets[sid];
 
-  // A new record requires a valid master key BEFORE any keypair is generated —
-  // never generate key material this module cannot then safely store.
-  const masterKey = loadMasterKey();
+    if (existing && !force_new) {
+      return { ok: true, created: false, ...publicView(sid, existing),
+        note: 'A wallet already existed for this session_id and was returned unchanged. This call did NOT generate a new keypair — rotating an address that may already hold a deposit would strand those funds. Pass force_new:true only if you accept that the previous address (and anything in it) becomes unreachable through this session_id.'
+          + (existing.privateKey !== undefined ? ' NOTE: this record is still in the old plaintext format — it can be listed but cannot sign until build/migrate-wallet-store.mjs has been run.' : ''),
+        storage: STORE_DISCLOSURE };
+    }
 
-  const privateKey = generatePrivateKey();
-  const account = privateKeyToAccount(privateKey);
-  const record = { address: account.address, encPrivateKey: encryptPrivateKey(privateKey, masterKey),
-    createdAt: new Date().toISOString(), label };
+    // A new record requires a valid master key BEFORE any keypair is generated —
+    // never generate key material this module cannot then safely store.
+    const masterKey = loadMasterKey();
 
-  let replaced = null;
-  if (existing && force_new) {
-    replaced = { address: existing.address, createdAt: existing.createdAt };
-    store.wallets[`${sid}__replaced_${existing.createdAt}`] = existing;  // never dropped
-  }
-  store.version = STORE_VERSION;
-  store.wallets[sid] = record;
-  writeStore(store);
+    const privateKey = generatePrivateKey();
+    const account = privateKeyToAccount(privateKey);
+    const record = { address: account.address, encPrivateKey: encryptPrivateKey(privateKey, masterKey),
+      createdAt: new Date().toISOString(), label };
 
-  return { ok: true, created: true, ...publicView(sid, record),
-    ...(replaced ? { replacedPrevious: replaced,
-      replacedNote: 'The previous record was NOT deleted — it was re-keyed under a suffixed session id so any funds it holds remain reachable server-side. It is no longer returned by this session_id.' } : {}),
-    privateKeyReturned: false,
-    custody: CUSTODY_DISCLOSURE,
-    storage: STORE_DISCLOSURE,
-    nextStep: 'Deposit tUSDC (and SOMI for gas) to this address, then call get_wallet_balance to confirm the deposit landed before trading.',
-    custodySigning: 'place_order, redeem, and withdraw all sign with THIS wallet\'s own key for this session_id — not a shared owner key. This is the actual signing wallet, not an inert deposit address.',
-  };
+    let replaced = null;
+    if (existing && force_new) {
+      replaced = { address: existing.address, createdAt: existing.createdAt };
+      store.wallets[`${sid}__replaced_${existing.createdAt}`] = existing;  // never dropped
+    }
+    store.version = STORE_VERSION;
+    store.wallets[sid] = record;
+    writeStore(store);
+
+    return { ok: true, created: true, ...publicView(sid, record),
+      ...(replaced ? { replacedPrevious: replaced,
+        replacedNote: 'The previous record was NOT deleted — it was re-keyed under a suffixed session id so any funds it holds remain reachable server-side. It is no longer returned by this session_id.' } : {}),
+      privateKeyReturned: false,
+      custody: CUSTODY_DISCLOSURE,
+      storage: STORE_DISCLOSURE,
+      nextStep: 'Deposit tUSDC (and SOMI for gas) to this address, then call get_wallet_balance to confirm the deposit landed before trading.',
+      custodySigning: 'place_order, redeem, and withdraw all sign with THIS wallet\'s own key for this session_id — not a shared owner key. This is the actual signing wallet, not an inert deposit address.',
+    };
+  });
 }
 
 /** List known sessions — addresses only. Useful for operators, never keys. */
@@ -258,7 +270,7 @@ export const CUSTODY_DISCLOSURE =
   'CUSTODIAL over this wallet. AgentRail generated and holds the private key server-side, so it CAN move these funds — nothing on-chain prevents it. This is a DIFFERENT model from the operator-delegation design in spec §3, where the operator key is scoped by OperatorPermissionsRegistry and architecturally cannot move funds. Do not describe this wallet as non-custodial. The protection here is exposure-limiting, not cryptographic against AgentRail itself: fund it only with what you intend to trade.';
 
 export const STORE_DISCLOSURE =
-  `Keys are stored ENCRYPTED AT REST (AES-256-GCM) as JSON on the server's local disk (path from AGENTRAIL_WALLET_STORE, default build/.wallet-store.json, gitignored, written atomically via temp+rename, mode 0600 where the OS honours it). The store file alone does not leak funds. The decryption key (${MASTER_KEY_ENV}) still lives in this process's environment and briefly in memory during signing — this is encryption at rest, NOT a KMS/HSM-backed signing path where key material never enters this process; that is the roadmap's stated further target, not yet built. No key rotation for the master key itself: changing it orphans existing records. No recovery path, no seed phrase: losing the store file loses the funds regardless of encryption. Single-process — concurrent writes from two processes could clobber.`;
+  `Keys are stored ENCRYPTED AT REST (AES-256-GCM) as JSON on the server's local disk (path from AGENTRAIL_WALLET_STORE, default build/.wallet-store.json, gitignored, written atomically via temp+rename, mode 0600 where the OS honours it). The store file alone does not leak funds. The decryption key (${MASTER_KEY_ENV}) still lives in this process's environment and briefly in memory during signing — this is encryption at rest, NOT a KMS/HSM-backed signing path where key material never enters this process; that is the roadmap's stated further target, not yet built. No key rotation for the master key itself: changing it orphans existing records. No recovery path, no seed phrase: losing the store file loses the funds regardless of encryption. Cross-process writes are now serialized via a real file lock (build/filelock.mjs) — two processes racing to create a wallet for the same session_id can no longer silently clobber each other; the second one correctly sees the first's completed write. This does not make the store a real database: a lock only serializes access, it does not add transactions, replication, or query capability — Tier 1 #5's real DB migration is still the eventual target for genuine multi-instance deployment.`;
 
 export function _resetStoreForTests() {
   try { fs.unlinkSync(STORE_PATH); } catch { /* already absent */ }

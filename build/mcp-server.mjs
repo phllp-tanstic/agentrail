@@ -182,6 +182,12 @@ server.registerTool('list_wallets', {
   inputSchema: {},
 }, wrap(core.list_wallets));
 
+server.registerTool('list_accounts', {
+  title: 'List known accounts (session ids only, metadata only)',
+  description: 'Every account in the accounts store: session ids, creation/rotation times, labels. Metadata only — no key material, no hashes, never. Read-only; no authentication required for the same reason as list_wallets.',
+  inputSchema: {},
+}, wrap(core.list_accounts));
+
 server.registerTool('parse_intent', {
   title: 'Validate and normalize a trading intent into place_order arguments',
   description: `Takes ALREADY-EXTRACTED structured intent and returns exactly what place_order needs, refusing anything unsupported before it can reach the chain. THIS TOOL DOES NOT DO NATURAL-LANGUAGE UNDERSTANDING and does not call an LLM — YOU (the calling agent) read the user's sentence and extract direction/asset/window/amount; this validates and normalizes them deterministically. It accepts synonyms (up/long -> YES, down/short -> NO, bitcoin -> BTC, "5m" -> 300, "$10" -> 10), resolves the asset to a live gated market with real book depth, and returns a \`confirmation\` block with estimated units, cost, max payout and payout multiple to show the user BEFORE executing. A NO direction returns \`ok:true\` with a WARNING (not a refusal) citing the real, still-open caveats — the crossing boundary is inferred from on-chain fills, not verified source. IT PLACES NOTHING — pass the returned \`placeOrderArgs\` to place_order after the user confirms. Refusals use stable machine codes in \`reason\`: direction_required, direction_unrecognized, window_not_supported (only 300s is proven; 60s liquidity is UNRELIABLE, not confirmed empty), asset_not_supported, ambiguous_sizing, sizing_required, invalid_target_dollar_amount, no_tradeable_market (transient, not invalid), no_market_with_adequate_runway (markets exist but all settle too soon to confirm — see min_seconds_to_expiry). ${SCOPE}`,

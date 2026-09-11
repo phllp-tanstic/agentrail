@@ -195,14 +195,13 @@ After the window settles, `redeem` scans finalized markets for held winning posi
 
 ## API reference
 
-Twelve tools. Every tool returns a JSON object; refusals use `{ok: false, refused: true, reason, detail}`. `session_id` + `api_key` are required by every write-capable tool and by `get_position` / `get_wallet_balance` on the session path.
-
-**Known gap: `list_accounts` is not callable over MCP.** `build/accounts.mjs` exports `list_accounts()` (metadata over the accounts store), but it has no `registerTool` call in `build/mcp-server.mjs` and is absent from the live `--mcp --list` output, so it is not documented as a tool here. Every other export of `accounts.mjs` made it into registration, so this looks like a reasonable oversight rather than a deliberate scope fence — it is flagged as a known gap, not silently dropped. Registering it (a 13th tool) is a code change, not a docs fix, and is pending an explicit decision.
+Thirteen tools. Every tool returns a JSON object; refusals use `{ok: false, refused: true, reason, detail}`. `session_id` + `api_key` are required by every write-capable tool and by `get_position` / `get_wallet_balance` on the session path.
 
 | Tool | Params | Returns |
 |---|---|---|
 | `create_account` | `session_id` (required), `label` (optional) | `{ok, created, sessionId, apiKey, warning, nextStep}`. `apiKey` shown exactly once. Not authenticated (it mints the credential); rate limited per IP. Refuses `account_already_exists`, `session_id_required`. |
 | `rotate_api_key` | `session_id`, `current_api_key` (both required) | New `apiKey`, shown once; the previous key is invalidated, not merely superseded. Refuses `account_not_found`, `invalid_current_api_key`, `current_api_key_required`. No recovery path that skips proof of ownership exists. |
+| `list_accounts` | none | `{ok, count, accounts: [{sessionId, createdAt, rotatedAt, label}], storePath}`. Metadata only, never key material or hashes. Read-only, no authentication required. |
 | `generate_wallet` | `session_id`, `api_key`; `force_new` (optional), `label` (optional) | `{ok, created, address, privateKeyReturned: false, custody, storage, nextStep, custodySigning}`; with `force_new`, also `replacedPrevious` (the old record is re-keyed under a suffixed id, never deleted). Refuses if no account exists, and refuses a missing or malformed master key. |
 | `get_wallet_balance` | `session_id` + `api_key`, or raw `address` | tUSDC and SOMI balances reported separately (collateral vs gas; a wallet with collateral but no SOMI cannot broadcast an order). An address not in the store is still reported, flagged `known: false`. Direct RPC read, so a deposit appears as soon as it is mined. |
 | `list_wallets` | none | `{ok, count, wallets, storePath}`. Addresses and metadata only; private keys are never returned by any tool. |
@@ -262,15 +261,16 @@ node build/trade-log-test.mjs      # 31/31
 node build/wallet-crypto-test.mjs  # 19/19  (AES-256-GCM round-trip, wrong-key refusal)
 ```
 
-Total: 188 assertions. `node build/mcp-test.mjs` additionally calls the tool functions directly and has an `--mcp --list` mode that verifies the tools are advertised over the real stdio MCP protocol. Run live this session, output as actually produced:
+Total: 188 assertions. `node build/mcp-test.mjs` additionally calls the tool functions directly and has an `--mcp --list` mode that verifies the tools are advertised over the real stdio MCP protocol; with `--expect-count=N` / `--expect-tool=<name>` it asserts the advertised count and that the named tools are present, exiting nonzero on mismatch. Run live this session, output as actually produced:
 
 ```text
-$ node build/mcp-test.mjs --mcp --list
-[+4.8s] MCP connected to build/mcp-server.mjs over stdio
-[+4.9s] server advertises 12 tools: list_markets, place_order, get_position, redeem, withdraw, create_account, rotate_api_key, generate_wallet, get_wallet_balance, list_wallets, parse_intent, get_trade_log
+$ node build/mcp-test.mjs --mcp --list --expect-count=13 --expect-tool=list_accounts
+[+3.7s] MCP connected to build/mcp-server.mjs over stdio
+[+3.8s] server advertises 13 tools: list_markets, place_order, get_position, redeem, withdraw, create_account, rotate_api_key, generate_wallet, get_wallet_balance, list_wallets, list_accounts, parse_intent, get_trade_log
+[+3.8s] assertions OK — count == 13, present: list_accounts
 ```
 
-Twelve tools over the wire, matching the twelve `registerTool` calls and the API reference above; `list_accounts` is absent from this list as well (see the note in [API reference](#api-reference)).
+Thirteen tools over the wire, matching the thirteen `registerTool` calls and the API reference above.
 
 Warning: `risk-test.mjs` must be run with `AGENTRAIL_RISK_STORE` redirected to a temp file. Run unredirected, it wipes the real risk ledger at the configured store path, because its reset helper persists. Example:
 
@@ -338,12 +338,12 @@ Everything below was explicitly deferred during the build; nothing here is inven
 There is no CONTRIBUTING.md. Expectations for now:
 
 - Issues: welcome, especially for factual corrections (a wrong claim in this README or in the research docs) and reproducible testnet failures.
-- Pull requests: keep the existing discipline. Every refusal path keeps its machine-readable `reason`; every write tool keeps `session_id` + `api_key` gating; risk limits stay server-side env config, not tool parameters; the trade log keeps recording refusals as first-class entries. Run the nine test suites (with the `AGENTRAIL_RISK_STORE` redirect for `risk-test`) and include their output.
+- Pull requests: keep the existing discipline. Every refusal path keeps its machine-readable `reason`; every write tool keeps `session_id` + `api_key` gating; risk limits stay server-side env config, not tool parameters; the trade log keeps recording refusals as first-class entries. Run the offline test suites — eight assertion-counted suites plus `mcp-test.mjs` for the protocol-level check (with the `AGENTRAIL_RISK_STORE` redirect for `risk-test`) — and include their output.
 - No new dependencies without a reason in the PR description.
 
 ## Conclusion
 
-AgentRail is a working, live-proven MCP server for natural-language trading of DreamDEX Event Contracts on the Somnia Shannon testnet. Its current state is real, not aspirational: twelve registered tools verified over the actual MCP protocol, eight offline assertion-counted suites all passing (188 assertions), a fill path proven end to end on-chain with balance-delta confirmation, server-side risk limits and refusal logging exercised by real traffic, and a deployed HTTPS path. Custody and scope limits are documented rather than papered over, and the roadmap above is the documented path to production hardening. It is not a demo shell — and it is not production-hardened either; both halves of that sentence are the honest summary.
+AgentRail is a working, live-proven MCP server for natural-language trading of DreamDEX Event Contracts on the Somnia Shannon testnet. Its current state is real, not aspirational: thirteen registered tools verified over the actual MCP protocol, eight offline assertion-counted suites all passing (188 assertions), a fill path proven end to end on-chain with balance-delta confirmation, server-side risk limits and refusal logging exercised by real traffic, and a deployed HTTPS path. Custody and scope limits are documented rather than papered over, and the roadmap above is the documented path to production hardening. It is not a demo shell — and it is not production-hardened either; both halves of that sentence are the honest summary.
 
 ## License
 

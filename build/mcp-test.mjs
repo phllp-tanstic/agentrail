@@ -13,6 +13,11 @@
 //
 //   node build/mcp-test.mjs --mcp --list
 //       Lists the tools the server advertises, with their input schemas.
+//
+//   node build/mcp-test.mjs --mcp --list --expect-count=13 --expect-tool=list_accounts
+//       Same listing, but ASSERTS the advertised tool count and that each
+//       named tool is present — exits nonzero on mismatch, so registration
+//       regressions fail loudly instead of only being visible by eyeball.
 // ============================================================================
 import * as core from './mcp-core.mjs';
 import path from 'node:path';
@@ -22,7 +27,10 @@ const __dir = path.dirname(fileURLToPath(import.meta.url));
 const argv = process.argv.slice(2);
 const useMcp = argv.includes('--mcp');
 const wantList = argv.includes('--list');
-const rest = argv.filter((a) => a !== '--mcp' && a !== '--list');
+const expectCountArg = argv.find((a) => a.startsWith('--expect-count='));
+const expectCount = expectCountArg ? Number(expectCountArg.slice('--expect-count='.length)) : null;
+const expectTools = argv.filter((a) => a.startsWith('--expect-tool=')).map((a) => a.slice('--expect-tool='.length));
+const rest = argv.filter((a) => a !== '--mcp' && a !== '--list' && !a.startsWith('--expect-count=') && !a.startsWith('--expect-tool='));
 const tool = rest[0];
 const args = rest[1] ? JSON.parse(rest[1]) : {};
 
@@ -59,6 +67,27 @@ console.error(`${el()} MCP connected to build/mcp-server.mjs over stdio`);
 
 const listed = await client.listTools();
 console.error(`${el()} server advertises ${listed.tools.length} tools: ${listed.tools.map((t) => t.name).join(', ')}`);
+
+const names = listed.tools.map((t) => t.name);
+let assertionsFailed = false;
+if (expectCount !== null && listed.tools.length !== expectCount) {
+  console.error(`${el()} FAIL — expected ${expectCount} advertised tools, got ${listed.tools.length}`);
+  assertionsFailed = true;
+}
+for (const t of expectTools) {
+  if (!names.includes(t)) {
+    console.error(`${el()} FAIL — expected tool "${t}" to be advertised`);
+    assertionsFailed = true;
+  }
+}
+if (expectCount !== null || expectTools.length > 0) {
+  if (assertionsFailed) {
+    console.error(`${el()} advertised: ${names.join(', ')}`);
+    await client.close();
+    process.exit(2);
+  }
+  console.error(`${el()} assertions OK — count${expectCount !== null ? ` == ${expectCount}` : ''}${expectTools.length ? `, present: ${expectTools.join(', ')}` : ''}`);
+}
 
 if (wantList) {
   out(listed.tools.map((t) => ({ name: t.name, title: t.title,

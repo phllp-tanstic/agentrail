@@ -48,6 +48,18 @@ const KEY_PREFIX = 'ar_sk_';       // human/scanner-recognizable prefix, same id
 const KEY_RANDOM_BYTES = 32;       // 256 bits of entropy
 const SALT_BYTES = 16;
 
+// Session ids that must NEVER be usable as accounts, even as literals.
+// '__legacy_owner_key__' is mcp-core.mjs's internal signing sentinel: ctx()
+// switches to the shared AGENTRAIL_OWNER_KEY whenever session_id equals it.
+// That branch exists so legacy standalone proof scripts can pass the string
+// DIRECTLY into the core functions — it must not be reachable from registered
+// MCP tools, where session_id arrives as an ordinary caller-controlled
+// argument. create_account is the only entry point that mints a credential
+// for an arbitrary literal, so refusing it here closes the MCP-reachable
+// path; generate_wallet in mcp-core.mjs refuses the same ids for the case
+// where an account for the sentinel already exists from earlier work.
+export const RESERVED_SESSION_IDS = Object.freeze(['__legacy_owner_key__']);
+
 function readStore() {
   try {
     const raw = fs.readFileSync(ACCOUNTS_STORE_PATH, 'utf8');
@@ -93,6 +105,13 @@ export function create_account({ session_id, label = null } = {}) {
       detail: 'session_id must be a non-empty string — the identifier this account is created under.' };
   }
   const sid = session_id.trim();
+
+  // The legacy-key sentinel in mcp-core.mjs's ctx() must stay reachable only
+  // by direct script calls, never by a caller minting a credential for it.
+  if (RESERVED_SESSION_IDS.includes(sid)) {
+    return { ok: false, refused: true, reason: 'reserved_session_id',
+      detail: `session_id="${sid}" is a reserved internal identifier and cannot be an account name. It matches the core's legacy owner-key signing sentinel, which is only meant to be reachable by direct standalone-script calls — never over the MCP tool layer.` };
+  }
 
   // LOCKED across processes — same reasoning as wallet.mjs's generate_wallet:
   // two separate processes could both pass the "doesn't exist yet" check

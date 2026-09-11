@@ -137,7 +137,7 @@ curl -s https://agentrail.duckdns.org/mcp -X POST \
   `rate_limited`, other tools unaffected, keys real. (The `UV_HANDLE_CLOSING`
   libuv assertion at process exit is the pre-existing Windows shutdown artifact
   documented in mcp-server.mjs's per-request-transport comment — unrelated.)
-- Full regression: accounts 21/21, auth-gate 15/15, filelock 13/13, intent 29/29,
+- Full regression: accounts 22/22, auth-gate 16/16, filelock 13/13, intent 29/29,
   risk 28/28, trade-log 31/31, wallet-crypto 19/19, rate-limit 32/32.
   ⚠ `risk-test` was run with AGENTRAIL_RISK_STORE redirected to a temp file —
   running it unredirected WIPES the real risk ledger (_resetRiskState persists).

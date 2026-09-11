@@ -130,5 +130,16 @@ check(15, 'ctx() cache reflects the NEW address after force_new — the actual r
     ? `cache correctly updated to ${cachedAfter}`
     : `STALE CACHE: store says ${after.address} but ctx() still serves ${cachedAfter}`);
 
+console.log('\n=== RESERVED SESSION IDS (security) ===\n');
+
+// create_account now refuses to mint a credential for the legacy sentinel, but
+// an account for that literal could pre-exist from earlier testing — so
+// generate_wallet must refuse it too, even with a valid-looking api_key. The
+// guard runs BEFORE requireApiKey, so this must refuse regardless of the key.
+const reserved = core.generate_wallet({ session_id: '__legacy_owner_key__', api_key: acct.apiKey });
+check(16, "generate_wallet REFUSES the reserved legacy sentinel session_id even when an api_key is supplied (defense in depth against a pre-existing account)",
+  reserved.ok === false && reserved.refused === true && reserved.reason === 'reserved_session_id',
+  `got ok=${reserved.ok} refused=${reserved.refused} reason=${reserved.reason}`);
+
 console.log(`\n=== RESULT: ${pass}/${pass + fail} PASS${fail ? `, ${fail} FAIL` : ''} ===`);
 process.exit(fail ? 1 : 0);

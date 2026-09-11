@@ -37,7 +37,7 @@ import { checkPreOrder, commitReservation, releaseReservation, recordSpend,
 import { list_wallets as walletList, generate_wallet as walletGenerate,
   _privateKeyForSession, CUSTODY_DISCLOSURE } from './wallet.mjs';
 import { requireApiKey, create_account as accountsCreate, rotate_api_key as accountsRotate,
-  list_accounts as accountsList } from './accounts.mjs';
+  list_accounts as accountsList, RESERVED_SESSION_IDS } from './accounts.mjs';
 import { normalizeIntent as normalizeIntentLocal,
   normalizeMinSecondsToExpiry as normalizeRunwayLocal } from './intent.mjs';
 import { recordOrder, recordRedeem, recordWallet, recordBalanceObservation,
@@ -172,6 +172,9 @@ function _buildCtx(owner) {
  *   already-proven standalone scripts in build/ (part3-win-proof.mjs, etc.)
  *   keep working unmodified; the MCP tool layer (mcp-server.mjs) never passes
  *   this value — every MCP-facing write path must go through a real session.
+ *   create_account and generate_wallet both REFUSE this literal as a
+ *   session_id (reason 'reserved_session_id'), so it cannot be minted into a
+ *   credential from the wire either.
  */
 function ctx({ session_id = null, requireKey = false } = {}) {
   if (session_id === '__legacy_owner_key__') {
@@ -1279,6 +1282,16 @@ export { get_trade_log, TRADE_LOG_DIR, DEFAULT_SESSION_ID } from './trade-log.mj
 
 /** generate_wallet + a trade-log entry. Creation AND the idempotent no-op are logged. */
 export function generate_wallet({ session_id, api_key, label = null, force_new = false } = {}) {
+  // Same reserved-id guard as create_account, and deliberately BEFORE
+  // requireApiKey: even if an account for the literal already exists (e.g.
+  // from earlier testing), the legacy owner-key sentinel must stay
+  // unreachable from a caller-provided session_id. Defense in depth — the
+  // credential mint already refuses these ids.
+  const sid = String(session_id ?? '').trim();
+  if (RESERVED_SESSION_IDS.includes(sid)) {
+    return { ok: false, refused: true, reason: 'reserved_session_id',
+      detail: `session_id="${sid}" is a reserved internal identifier — it selects the core's legacy AGENTRAIL_OWNER_KEY signing sentinel and cannot be used as a real session. Refused even if an account of that name was created during earlier testing.` };
+  }
   requireApiKey(session_id, api_key);
   const res = walletGenerate({ session_id, label, force_new });
   // BUG FIX (found during independent custody review, reproduced before this

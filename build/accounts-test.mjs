@@ -110,6 +110,13 @@ const allResponses = JSON.stringify([dup, noSid, rotateNoProof, rotateNoAccount,
 check(21, 'no real api_key value appears in any REFUSAL or listing response',
   !allResponses.includes(created.apiKey.slice(6)) && !allResponses.includes(rotated.apiKey.slice(6)));
 
+console.log('\n=== RESERVED SESSION IDS (security) ===\n');
+
+const reserved = create_account({ session_id: '__legacy_owner_key__' });
+check(22, "create_account REFUSES the reserved legacy sentinel session_id, closing the MCP-reachable path to AGENTRAIL_OWNER_KEY signing",
+  reserved.ok === false && reserved.refused === true && reserved.reason === 'reserved_session_id',
+  `got ok=${reserved.ok} refused=${reserved.refused} reason=${reserved.reason}`);
+
 _resetAccountsStoreForTests();
 console.log(`\n=== RESULT: ${pass}/${pass + fail} PASS${fail ? `, ${fail} FAIL` : ''} ===`);
 process.exit(fail ? 1 : 0);

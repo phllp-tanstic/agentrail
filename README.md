@@ -251,8 +251,8 @@ research/              On-chain research, not shipped code
 Eight assertion-counted suites, run directly with Node, plus `mcp-test.mjs` for protocol-level verification (see below). As of this writing, all pass at these counts (re-run them yourself; they take seconds):
 
 ```bash
-node build/accounts-test.mjs       # 21/21
-node build/auth-gate-test.mjs      # 15/15  (API-key auth: wrong key, missing key, cross-session)
+node build/accounts-test.mjs       # 22/22
+node build/auth-gate-test.mjs      # 16/16  (API-key auth: wrong key, missing key, cross-session)
 node build/filelock-test.mjs       # 13/13  (cross-process lock races)
 node build/intent-test.mjs         # 29/29
 node build/rate-limit-test.mjs     # 32/32  (thresholds, retryAfterSeconds, spoof rejection, fail-closed)
@@ -261,7 +261,7 @@ node build/trade-log-test.mjs      # 31/31
 node build/wallet-crypto-test.mjs  # 19/19  (AES-256-GCM round-trip, wrong-key refusal)
 ```
 
-Total: 188 assertions. `node build/mcp-test.mjs` additionally calls the tool functions directly and has an `--mcp --list` mode that verifies the tools are advertised over the real stdio MCP protocol; with `--expect-count=N` / `--expect-tool=<name>` it asserts the advertised count and that the named tools are present, exiting nonzero on mismatch. Run live this session, output as actually produced:
+Total: 190 assertions. `node build/mcp-test.mjs` additionally calls the tool functions directly and has an `--mcp --list` mode that verifies the tools are advertised over the real stdio MCP protocol; with `--expect-count=N` / `--expect-tool=<name>` it asserts the advertised count and that the named tools are present, exiting nonzero on mismatch. Run live this session, output as actually produced:
 
 ```text
 $ node build/mcp-test.mjs --mcp --list --expect-count=13 --expect-tool=list_accounts
@@ -343,7 +343,7 @@ There is no CONTRIBUTING.md. Expectations for now:
 
 ## Conclusion
 
-AgentRail is a working, live-proven MCP server for natural-language trading of DreamDEX Event Contracts on the Somnia Shannon testnet. Its current state is real, not aspirational: thirteen registered tools verified over the actual MCP protocol, eight offline assertion-counted suites all passing (188 assertions), a fill path proven end to end on-chain with balance-delta confirmation, server-side risk limits and refusal logging exercised by real traffic, and a deployed HTTPS path. Custody and scope limits are documented rather than papered over, and the roadmap above is the documented path to production hardening. It is not a demo shell — and it is not production-hardened either; both halves of that sentence are the honest summary.
+AgentRail is a working, live-proven MCP server for natural-language trading of DreamDEX Event Contracts on the Somnia Shannon testnet. Its current state is real, not aspirational: thirteen registered tools verified over the actual MCP protocol, eight offline assertion-counted suites all passing (190 assertions), a fill path proven end to end on-chain with balance-delta confirmation, server-side risk limits and refusal logging exercised by real traffic, and a deployed HTTPS path. Custody and scope limits are documented rather than papered over, and the roadmap above is the documented path to production hardening. It is not a demo shell — and it is not production-hardened either; both halves of that sentence are the honest summary.
 
 ## License
 

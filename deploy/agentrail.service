@@ -1,0 +1,47 @@
+# systemd unit — AgentRail MCP server (stdio + Streamable HTTP on 127.0.0.1:8787)
+# Install to: /etc/systemd/system/agentrail.service  (bootstrap-agentrail.sh does this)
+#
+# Secrets live in /etc/agentrail/agentrail.env (chmod 640 root:agentrail), NEVER
+# in the repo. Store paths point at /var/lib/agentrail — the handover's
+# store-path env vars in active use (§7):
+#   AGENTRAIL_WALLET_STORE, AGENTRAIL_ACCOUNTS_STORE, AGENTRAIL_RISK_STORE,
+#   AGENTRAIL_TRADE_LOG_DIR
+
+[Unit]
+Description=AgentRail MCP server (chain tools over stdio + localhost:8787 HTTP)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agentrail
+Group=agentrail
+WorkingDirectory=/opt/agentrail
+ExecStart=/opt/node-v24.16.0/bin/node /opt/agentrail/build/mcp-server.mjs
+Environment=AGENTRAIL_HTTP_PORT=8787
+Environment=AGENTRAIL_HTTP_HOST=127.0.0.1
+Environment=AGENTRAIL_WALLET_STORE=/var/lib/agentrail/.wallet-store.json
+Environment=AGENTRAIL_ACCOUNTS_STORE=/var/lib/agentrail/.accounts-store.json
+Environment=AGENTRAIL_RISK_STORE=/var/lib/agentrail/.risk-store.json
+Environment=AGENTRAIL_TRADE_LOG_DIR=/var/lib/agentrail/.trade-log/
+EnvironmentFile=/etc/agentrail/agentrail.env
+Restart=always
+RestartSec=3
+
+# Hardening: node needs only /var/lib/agentrail (stores) and /opt/agentrail (read).
+# NOTE (found live, 2026-09-11): MemoryDenyWriteExecute must stay OFF for this
+# service — V8 cannot initialize its code range under W^X (crashes at
+# Isolate::Initialize with errno 12/ENOMEM before any code runs). Documented
+# trade: JIT-runtime compatibility over that single hardening knob.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/agentrail
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

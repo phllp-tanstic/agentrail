@@ -1,0 +1,20 @@
+# Caddyfile — AgentRail public HTTPS front.
+#
+# TERMINATION: Caddy owns 80/443 and the agentrail.duckdns.org certificate
+# (automatic via the HTTP-01 / DuckDNS-reachable challenge). AgentRail itself
+# stays on 127.0.0.1:8787 — the security group must NOT open 8787.
+#
+# header_up Host: REQUIRED. mcp-server.mjs, bound to loopback, runs a
+# DNS-rebinding guard that refuses any Host header outside
+# {127.0.0.1, localhost, ::1}. Caddy forwards the ORIGINAL host
+# (agentrail.duckdns.org) by default — without this rewrite every proxied
+# request 400s at AgentRail. Rewriting the Host to localhost keeps that guard
+# meaningful for direct local access while letting the public path through.
+# (Alternative, not chosen: teaching the server a second allowed host via env —
+# more code for zero extra safety, since 8787 is firewalled from the internet.)
+
+agentrail.duckdns.org {
+	reverse_proxy localhost:8787 {
+		header_up Host localhost:8787
+	}
+}

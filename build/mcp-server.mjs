@@ -27,6 +27,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
 import * as core from './mcp-core.mjs';
+import { withCreateAccountRateLimit, runWithRequestClientIp, resolveRequestClientIp } from './rate-limit.mjs';
 
 const server = new McpServer({ name: 'agentrail', version: '0.1.0' });
 
@@ -135,7 +136,12 @@ server.registerTool('create_account', {
     session_id: z.string().describe('New identifier to create an account under. Must not already have one.'),
     label: z.string().optional().describe('Optional human-readable note.'),
   },
-}, wrap(core.create_account));
+  // The ONLY rate-limited tool (see build/rate-limit.mjs for why): create_account
+  // is the one write-capable tool with no api_key gate — it mints the credential
+  // every other tool requires. Per-IP fixed window (default 5 / 10 min); identity
+  // is the HTTP client IP (X-Forwarded-For honored only from loopback peers, i.e.
+  // our own Caddy). stdio / direct-core calls carry no IP and pass through.
+}, wrap(withCreateAccountRateLimit(core.create_account)));
 
 server.registerTool('rotate_api_key', {
   title: 'Replace a session\'s api_key (requires proving the current one)',
@@ -295,7 +301,12 @@ if (process.env.AGENTRAIL_HTTP_PORT) {
     let thrown = null;
     try {
       await httpMcpServer.connect(transport);
-      await transport.handleRequest(req, res);
+      // Carry the client's per-IP identity (socket peer; X-Forwarded-For only
+      // from loopback peers — see build/rate-limit.mjs) into the tool layer,
+      // where the create_account rate limiter consumes it. AsyncLocalStorage
+      // propagates through the SDK's await chain into the tool handlers.
+      await runWithRequestClientIp(resolveRequestClientIp(req),
+        () => transport.handleRequest(req, res));
     } catch (e) {
       thrown = e;
     } finally {

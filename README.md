@@ -90,12 +90,14 @@ All configuration is via environment variables. Defaults apply when a variable i
 | `AGENTRAIL_RISK_STORE` | No | `build/.risk-store.json` (gitignored) | Path to the persisted risk ledger. |
 | `AGENTRAIL_TRADE_LOG_DIR` | No | `build/.trade-log/` (gitignored) | Directory for per-session append-only trade logs. |
 | `AGENTRAIL_SESSION_ID` | No | `default` | Session id used by `get_trade_log` when no session is passed. |
-| `AGENTRAIL_MAX_STAKE_USD` | No | `5` | Max collateral committable to a single market window, in USD (tUSDC). Requests above it are clamped, not rejected. |
+| `AGENTRAIL_MAX_STAKE_USD` | No | `5` | Max collateral committable to a single market window, in USD (tUSDC). An order above it is refused (reason `max_stake_per_window_exceeded`), never trimmed. |
 | `AGENTRAIL_MAX_DAILY_LOSS_USD` | No | `10` | Max realized drawdown per UTC day before all further orders are refused. |
 | `AGENTRAIL_RATE_CREATE_ACCOUNT_MAX` | No | `5` | Max `create_account` calls per IP per window. |
 | `AGENTRAIL_RATE_CREATE_ACCOUNT_WINDOW_SECONDS` | No | `600` | Length of that fixed window. |
 | `AGENTRAIL_WALLET_MASTER_KEY_NEW` | No | unset | Used only by `build/rotate-wallet-master-key.mjs`. |
-| `AGENTRAIL_OWNER_KEY` | No | unset | Legacy owner private key used only by standalone `build/` scripts (funding, research probes), never by the registered MCP tools. |
+| `SOMNIA_RPC_URL` | No | Somnia Shannon public RPC (`https://api.infra.testnet.somnia.network`) | RPC endpoint override, used by `build/fund-tusdc.mjs` (tUSDC faucet funding). |
+| `AGENTRAIL_OPERATOR_KEY` | No | unset | Private key used only by the `research/onchain-proof/` probe scripts (pays gas for probe transactions). Never read by `build/`. |
+| `AGENTRAIL_OWNER_KEY` | No | unset | Legacy owner private key. Standalone `build/` scripts (funding, research probes) sign with it directly, and the core's `ctx()` special-cases the reserved session_id `__legacy_owner_key__` to it for those direct calls. `create_account` and `generate_wallet` refuse that literal (reason `reserved_session_id`), so it cannot be minted into a credential through the MCP tool layer. |
 
 The deployed systemd unit uses `AGENTRAIL_WALLET_STORE=/var/lib/agentrail/.wallet-store.json` and similar paths under `/var/lib/agentrail`, with the master key in `/etc/agentrail/agentrail.env` (chmod 640 `root:agentrail`), never in the repo.
 
@@ -228,6 +230,7 @@ build/                 The server and everything it imports (plain ESM .mjs, no 
   trade-log.mjs        Append-only JSONL audit log
   filelock.mjs         Cross-process file locking
   intent.mjs           parse_intent normalization and validation
+  redeem-guard.mjs     Pre-broadcast redeem guard (every redeem leg gated before any broadcast)
   tick-snap.mjs        Price-to-tick snapping
   *-test.mjs           Test suites (run with node directly)
   migrate-*.mjs        One-off store migration scripts (plaintext to encrypted wallet store)
@@ -239,7 +242,7 @@ deploy/                Real deployment kit (see Deployment)
   bootstrap-agentrail.sh  Run on the EC2 box as root: Node, user, stores, systemd, Caddy
   RUNBOOK.md           Step-by-step EC2 to DuckDNS to Caddy to verify to commit runbook
 site/                  Landing page (static index.html)
-research/              On-chain research, not shipped code
+research/              On-chain research (probe scripts + proof artifacts) — AND a runtime dependency: mcp-core.mjs reads onchain-proof/error-selectors.json at startup
   AgentRail-Build-Spec.md   Build spec: architecture, custody model, scope fences
   NO-side-fill-paths.md     Investigation of how NO-side orders actually fill
   PROOF-LOG.md              Raw proof log with real transactions

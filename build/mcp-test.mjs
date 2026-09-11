@@ -41,7 +41,7 @@ const out = (o) => console.log(JSON.stringify(core.jsonSafe(o), null, 2));
 if (!useMcp) {
   // ------------------------------------------------ direct in-process call
   if (!core[tool]) {
-    console.error(`unknown tool "${tool}". available: list_markets, place_order, get_position, redeem`);
+    console.error(`unknown tool "${tool}". available: list_markets, parse_intent, place_order, get_position, redeem, withdraw, get_wallet_balance, list_wallets, generate_wallet, create_account, rotate_api_key, list_accounts, get_trade_log (or run with --mcp --list to see what the server advertises)`);
     process.exit(2);
   }
   console.error(`${el()} DIRECT call ${tool}(${JSON.stringify(args)})`);

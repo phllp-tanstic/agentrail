@@ -141,7 +141,7 @@ curl -s https://agentrail.duckdns.org/mcp -X POST \
   risk 28/28, trade-log 31/31, wallet-crypto 19/19, rate-limit 32/32.
   ⚠ `risk-test` was run with AGENTRAIL_RISK_STORE redirected to a temp file —
   running it unredirected WIPES the real risk ledger (_resetRiskState persists).
-- `mcp-test --mcp --list` — all 12 tools still advertised over real stdio MCP.
+- `mcp-test --mcp --list` — all 13 tools still advertised over real stdio MCP.
 - Committed and pushed at Part 5, only after the public round-trip proof
   (create_account → generate_wallet → get_wallet_balance over
   https://agentrail.duckdns.org from a separate machine, real outputs).

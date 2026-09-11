@@ -1,5 +1,5 @@
 // ============================================================================
-// AgentRail MCP CORE — the four tools, as plain async functions.
+// AgentRail MCP CORE — the MCP tool functions, as plain async functions.
 //
 // THIN WRAPPERS ONLY. Every code path here is lifted from a script in build/
 // that has a live testnet proof behind it in research/PROOF-LOG.md. Where a
@@ -13,7 +13,9 @@
 //                   + part3-win-proof.mjs:199-244 (guard -> broadcast -> delta)
 //
 // SCOPE FENCES (deliberate refusals — see build/PHASE-B-LOG.md):
-//   - direction: YES only.   NO-side fills are an open, undetermined phenomenon.
+//   - direction: YES and NO.   NO fills via mint-a-pair against a resting
+//                BUY_YES (research/NO-side-fill-paths.md §7 item 1); a direct
+//                NO-vs-NO cross has never been observed.
 //   - window:    300s only.  60s depth is UNRELIABLE, not proven absent — runs 1
 //                and 2 both FILLED on 60s markets; a narrow probe found no depth
 //                at one timing offset. The fence is a reliability choice.
@@ -313,7 +315,9 @@ export async function list_markets({ window_seconds = 300, require_yes_liquidity
     });
   }
   out.sort((a, b) => a.secondsToExpiry - b.secondsToExpiry); // soonest settlement first
-  return { ok: true, scope: { direction: 'YES only', windowSeconds: Number(window_seconds) },
+  return { ok: true, scope: { direction: 'YES and NO',
+    directionDetail: "NO orders cross the same single YES-terms book via mint-a-pair against a resting BUY_YES; a direct NO-vs-NO cross has never been observed",
+    windowSeconds: Number(window_seconds) },
     liveMarketsSeen: live.length, tradeable: out.length, markets: out, skipped,
     note: 'Depth shown is real resting YES-book liquidity on BOTH crossing sides, read from the pool\'s single YES-terms book via ONE getBinaryOrderBook call per market: yesAsks (what a YES order crosses) and yesBids (real BUY_YES orders — what a NO order crosses via mint-a-pair). The noBids/noAsks arrays in the same response are an arithmetic mirror of yesAsks/yesBids and would double-count liquidity, so they are not reported (PROOF-LOG RUN 3 PART 2; research/NO-side-fill-paths.md §6).' };
 }

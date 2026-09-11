@@ -44,3 +44,9 @@ build/.risk-store.json
 *.risk-store.json
 *.risk-store.json.*
 .risk-store.*.tmp
+
+# Local installers (e.g. AWSCLIV2.msi — the AWS CLI v2 installer used for the
+# KMS/IAM scoping) are tooling downloads, never repo material. Covered from
+# day one so a ~47 MB .msi never reappears as untracked noise or gets swept
+# into a `git add -A`.
+*.msi
